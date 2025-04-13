@@ -1,10 +1,10 @@
-# 🧠 EasyML — A Neural Net Playground for Actually Learning Neural Nets
+# 🧠 EasyML — A Neural Net Playground for Neural Nets
 
 <p align="center"><img src="assets/icon.png" alt="EasyML Icon" width="100"></p>
 
 **EasyML** is a lightweight PyQt GUI app for training and experimenting with simple neural networks, built entirely from scratch.
 
-I built this because I was tired of the “click-and-hope” approach to ML tutorials. I wanted to *actually* learn how neural networks work — and the best way to do that was to build one. EasyML is my learning project turned into a working app, designed for curious tinkerers like me who want more than just Jupyter notebooks and online platforms that abstract everything away.
+I built this because I was tired of the “click-and-hope” approach to ML tutorials. I wanted to *actually* learn how neural networks work — and the best way to do that was to build one. EasyML is my learning project turned into a working app.
 
 **Note:** This version is focused on image-based datasets that are processed into a 28x28 grayscale format.
 
@@ -109,7 +109,7 @@ Some plans on the horizon:
 
 ## 🧪 Why This Exists
 
-This is a learning tool disguised as a playground. It’s not here to beat SOTA benchmarks — it’s here to make the whole training loop *click* for you. If you’ve ever felt like ML tutorials only teach you how to use *tools*, not how things actually work — this project might help fill in the gaps.
+This is a learning tool disguised as a playground. It’s not here to beat SOTA benchmarks — it’s here to make the whole training loop *click* for you. 
 
 ---
 
