@@ -433,11 +433,24 @@ class MainWindow(QMainWindow):
 
     def scan_datasets(self):
         """Scans the 'data' directory for known dataset types and populates the dropdown."""
-        self._log_message("Scanning for datasets in 'data/' directory...")
+        self._log_message("Scanning for datasets...")
         self.datasets_info = {} # Reset discovered datasets
-        data_dir = "data"
 
-        # --- Check for specific known files/patterns ---
+        # --- Determine base path for data directory --- #
+        if getattr(sys, 'frozen', False):
+            # Running in a PyInstaller bundle
+            base_path = sys._MEIPASS
+            self._log_message(f"Running bundled, using MEIPASS: {base_path}")
+        else:
+            # Running as a normal script
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            self._log_message(f"Running as script, using script dir: {base_path}")
+            
+        data_dir = os.path.join(base_path, "data")
+        self._log_message(f"Looking for datasets in: {data_dir}")
+        # --------------------------------------------- #
+
+        # --- Check for specific known files/patterns using data_dir --- #
         # MNIST Check
         mnist_path = os.path.join(data_dir, "train.csv")
         if os.path.exists(mnist_path):
@@ -605,7 +618,7 @@ class MainWindow(QMainWindow):
                 self.image_preview_label.setPixmap(scaled_pixmap)
 
                 self._log_message("Running forward propagation...")
-                if not hasattr(self, 'model_params') or self.model_params[0] is None:
+                if not hasattr(self, 'model_params') or not self.model_params:
                      self._log_message("ERROR: Model parameters not loaded. Load weights first.")
                      self.image_preview_label.setText("Load weights first.")
                      self.probability_graph.clear_graph()
@@ -1127,7 +1140,8 @@ class MainWindow(QMainWindow):
         # Run prediction
         try:
             self._log_message("Running forward propagation on drawing...")
-            if not hasattr(self, 'model_params') or self.model_params[0] is None:
+            # Check if model_params dictionary exists and is not empty
+            if not hasattr(self, 'model_params') or not self.model_params:
                  self._log_message("ERROR: Model parameters not loaded. Load weights first.")
                  self.image_preview_label.setText("Load weights first.")
                  self.probability_graph.clear_graph()
@@ -1150,6 +1164,11 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self._log_message(f"ERROR during prediction: {e}")
+            # --- Add detailed exception info ---
+            import traceback
+            self._log_message(f"Exception Type: {type(e)}")
+            self._log_message(f"Traceback:\n{traceback.format_exc()}")
+            # ------------------------------------
             self.image_preview_label.setText("Error predicting.")
             self.probability_graph.clear_graph()
 
