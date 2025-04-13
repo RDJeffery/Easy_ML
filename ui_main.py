@@ -9,7 +9,8 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtCore import Qt, QDateTime, QObject, pyqtSignal, QThread, QRectF, QSize # Import QSize for canvas
 import numpy as np
-from model import neural_net, datasets # Import datasets module
+from model import neural_net # Import neural_net from model
+import datasets # Import datasets from top level
 from PIL import Image
 import os
 from PyQt5 import QtGui # Keep QtGui import for QTextCursor
