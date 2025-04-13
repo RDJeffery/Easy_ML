@@ -2,19 +2,19 @@ import sys
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QComboBox, QTextEdit, QLineEdit, QSpinBox, QDoubleSpinBox, QGroupBox, QFormLayout,
-    QApplication, QProgressBar, QSizePolicy, QCheckBox, QTabWidget, QDialog # Import QDialog
+    QApplication, QProgressBar, QSizePolicy, QCheckBox, QTabWidget, QDialog, QFrame # Import QDialog
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QColor, QPen, QBrush, QFontMetrics, QIcon # Import QIcon
 )
-from PyQt5.QtCore import Qt, QDateTime, QObject, pyqtSignal, QThread, QRectF # Import QRectF
+from PyQt5.QtCore import Qt, QDateTime, QObject, pyqtSignal, QThread, QRectF, QSize # Import QSize for canvas
 import numpy as np
 from model import neural_net, datasets # Import datasets module
 from PIL import Image
 import os
 from PyQt5 import QtGui # Keep QtGui import for QTextCursor
 import glob # Import glob for file searching
-from typing import Optional # For worker thread typing
+from typing import Optional, Dict, Any, List # For worker thread typing
 
 # --- Add ui directory to path ---
 ui_dir = os.path.join(os.path.dirname(__file__), 'ui')
@@ -40,428 +40,366 @@ except ImportError as e:
         def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); QLabel("Error loading PlotWidget", self)
         def update_plot(self, *args, **kwargs): pass
 
-# Worker class for handling training in a separate thread
-class TrainingWorker(QObject):
-    # Signals to communicate with the main thread
-    progress_updated = pyqtSignal(int, int) # current_iteration, total_iterations
-    training_finished = pyqtSignal(tuple)   # (W1, b1, W2, b2, loss_hist, acc_hist)
-    log_message = pyqtSignal(str)       # For sending log messages from worker
-    error_occurred = pyqtSignal(str)      # To signal errors
+# --- Local UI Component Imports ---
+from ui.training_worker import TrainingWorker
+from ui.probability_bar_graph import ProbabilityBarGraph
 
-    def __init__(self, X_train, Y_train, X_dev, Y_dev, alpha, iterations, initial_params, patience):
-        super().__init__()
-        self.X_train, self.Y_train = X_train, Y_train
-        self.X_dev, self.Y_dev = X_dev, Y_dev
-        self.alpha = alpha
-        self.iterations = iterations
-        self.initial_params = initial_params
-        self.patience = patience # Store patience
-
-    # Slot to run the training
-    def run_training(self):
-        try:
-            self.log_message.emit("Worker thread started gradient descent...")
-            W1, b1, W2, b2 = self.initial_params
-
-            # --- Define the callback function to emit progress signal ---
-            def progress_callback(current_iter, total_iter):
-                self.progress_updated.emit(current_iter, total_iter)
-            # --- End callback function ---
-
-            # Call gradient descent, passing the callback and patience
-            results = neural_net.gradient_descent(
-                self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-                self.alpha, self.iterations, W1, b1, W2, b2,
-                progress_callback=progress_callback,
-                patience=self.patience # Pass patience here
-            )
-            self.training_finished.emit(results)
-        except Exception as e:
-            self.error_occurred.emit(f"Error in training worker: {e}")
-
-
-# --- Custom Widget for Probability Bar Graph ---
-class ProbabilityBarGraph(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.probabilities = []
-        self.predicted_class = -1
-        self.setMinimumHeight(100) # Ensure it has some height
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred) # Allow horizontal expansion
-
-    def set_probabilities(self, probs, predicted_class=-1):
-        # Expects a 1D numpy array or list
-        self.probabilities = np.asarray(probs)
-        self.predicted_class = predicted_class
-        self.update() # Trigger a repaint
-
-    def clear_graph(self):
-        self.probabilities = []
-        self.predicted_class = -1
-        self.update()
-
-    def paintEvent(self, event):
-        # Check if the probabilities container is empty (works for list or numpy array)
-        if len(self.probabilities) == 0:
-            return # Don't draw if no data
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        num_classes = len(self.probabilities)
-        if num_classes == 0:
-            return
-
-        width = self.width()
-        height = self.height()
-        padding = 5 # Padding around the graph
-        label_width = 40 # Space for labels like "0: 0.95"
-        graph_area_width = width - padding * 2 - label_width
-        bar_height = (height - padding * (num_classes + 1)) / num_classes
-
-        if bar_height <= 0 or graph_area_width <= 0: return # Not enough space
-
-        # Font for labels
-        font = painter.font()
-        fm = QFontMetrics(font)
-        text_height = fm.height()
-
-        # Define colors
-        bar_color = QColor("#3498db") # Blue
-        highlight_color = QColor("#e74c3c") # Red
-        text_color = QColor(Qt.black)
-        painter.setPen(Qt.NoPen) # No outline for bars by default
-
-        for i, prob in enumerate(self.probabilities):
-            bar_y = padding + i * (bar_height + padding)
-            bar_width = max(0, prob * graph_area_width) # Ensure non-negative width
-
-            # Choose color
-            if i == self.predicted_class:
-                 painter.setBrush(QBrush(highlight_color))
-            else:
-                 painter.setBrush(QBrush(bar_color))
-
-            # Draw bar
-            painter.drawRect(QRectF(padding + label_width, bar_y, bar_width, bar_height))
-
-            # Draw label (Class Index: Probability)
-            label_text = f"{i}: {prob:.2f}"
-            text_x = padding
-            # Center text vertically in the bar space
-            text_y = bar_y + bar_height / 2 + text_height / 4 # Approximation for vertical centering
-
-            painter.setPen(text_color) # Set pen for text
-            painter.drawText(int(text_x), int(text_y), label_text)
-            painter.setPen(Qt.NoPen) # Reset pen
-
+# --- Main Application Execution --- #
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle("🧠 Neural Net Playground")
-        self.setWindowIcon(QIcon('assets/icon.png')) # Set window icon (use icon from assets dir)
+        super().__init__() # Initialize the QMainWindow base class
+        self.setWindowTitle("🧠 Neural Net Playground") # Set the text in the window title bar
+        self.setWindowIcon(QIcon('assets/icon.png')) # Set the application icon (appears in title bar/taskbar)
         # Adjust minimum size if needed, tabs might help
-        self.setMinimumSize(600, 550)
+        self.setMinimumSize(600, 550) # Prevent the window from being resized too small
 
         # --- Initialize Core Attributes ---
+        # Keeps track of important application state like loaded data, model parameters, etc.
         self._init_attributes()
-        self.expanded_plot_dialog = None # Attribute to hold the expanded plot window
+        self.expanded_plot_dialog = None # Holds the pop-out plot window if created
 
         # --- Setup Main Layout ---
+        # QWidget is the base class for UI objects. We use one as the central container.
         self.central = QWidget()
+        # QVBoxLayout arranges widgets vertically. This is the main layout for the central widget.
         self.main_layout = QVBoxLayout()
 
         # --- Create Log Area (Must be done before widgets that log) --- #
+        # The log area needs to exist before other UI parts are created, in case they log messages during setup.
         log_area = self._create_log_area()
 
         # --- Create Tab Widget --- #
+        # QTabWidget provides a tabbed interface to organize different sections of the UI.
         self.tabs = QTabWidget()
 
         # --- Create Widgets for Tabs --- #
+        # Each tab holds a QWidget, which in turn has its own layout and contains the relevant UI groups.
 
-        # Data Tab
+        # Data Tab: For selecting and loading datasets
         data_tab = QWidget()
-        data_layout = QVBoxLayout(data_tab)
+        data_layout = QVBoxLayout(data_tab) # Layout for the Data tab
+        # Create the group box containing dataset selection widgets
         dataset_group = self._create_dataset_group()
-        data_layout.addWidget(dataset_group)
-        data_layout.addStretch() # Push content up
+        data_layout.addWidget(dataset_group) # Add the group box to the tab's layout
+        data_layout.addStretch() # Pushes content up if there's extra vertical space
 
-        # Train Tab
+        # Train Tab: For configuring and running model training
         train_tab = QWidget()
-        train_layout = QVBoxLayout(train_tab)
-        training_group = self._create_training_group()
+        train_layout = QVBoxLayout(train_tab) # Layout for the Train tab
+        # Create group boxes for training controls and model management (save/load)
+        self.training_group = self._create_training_group()
         model_mgmt_group = self._create_model_mgmt_group()
-        # Layout for Expand Plot Button and Info Text
-        plot_info_layout = QHBoxLayout()
+        # Layout for the Expand Plot Button and Info Text
+        plot_info_layout = QHBoxLayout() # Horizontal layout for button and text
 
         expand_plot_button = QPushButton("🔎 Expand Plot")
+        # Connect the button's 'clicked' signal to the '_show_expanded_plot' method (slot)
         expand_plot_button.clicked.connect(self._show_expanded_plot)
         plot_info_layout.addWidget(expand_plot_button)
 
         plot_info_label = QLabel("<- Training history visualized here")
-        plot_info_label.setStyleSheet("font-style: italic; color: grey;")
+        plot_info_label.setStyleSheet("font-style: italic; color: grey;") # Style the label
         plot_info_layout.addWidget(plot_info_label)
         plot_info_layout.addStretch() # Push button and label left
 
-        train_layout.addWidget(training_group)
+        # Add the training-related group boxes and the plot info layout to the Train tab
+        train_layout.addWidget(self.training_group)
         train_layout.addWidget(model_mgmt_group)
-        train_layout.addLayout(plot_info_layout) # Add button and info label
-        # No stretch here, let plot expand
+        train_layout.addLayout(plot_info_layout)
+        # No stretch here, let the training section potentially expand if needed
 
-        # Infer Tab
-        infer_tab = QWidget()
-        infer_layout = QVBoxLayout(infer_tab)
+        # Test Tab: For running predictions on the trained model
+        infer_tab = QWidget() # Renamed to 'Test' visually, but variable name is 'infer_tab'
+        infer_layout = QVBoxLayout(infer_tab) # Layout for the Test tab
+        # Create the group box containing inference controls (file, drawing) and results display
         inference_group = self._create_inference_group()
         infer_layout.addWidget(inference_group)
-        infer_layout.addStretch()
+        infer_layout.addStretch() # Push content up
 
-        # Add Tabs to Tab Widget
+        # Add Tabs to Tab Widget with user-friendly names and icons
         self.tabs.addTab(data_tab, "💾 Data")
         self.tabs.addTab(train_tab, "🚀 Train")
-        self.tabs.addTab(infer_tab, "🧪 Test")
+        self.tabs.addTab(infer_tab, "🧪 Test") # This is the 'Test' tab
 
         # --- Add Tab Widget and Log Area to Main Layout --- #
-        self.main_layout.addWidget(self.tabs)
-        self.main_layout.addWidget(log_area)
-        # Adjust stretch factor if needed (e.g., give log less space)
-        self.main_layout.setStretchFactor(self.tabs, 4) # Give tabs more space
-        self.main_layout.setStretchFactor(log_area, 1) # Log less space
+        self.main_layout.addWidget(self.tabs) # Add the entire tab widget structure
+        self.main_layout.addWidget(log_area) # Add the log area below the tabs
+        # Adjust stretch factor: give tabs more vertical space (4 parts) than the log area (1 part)
+        self.main_layout.setStretchFactor(self.tabs, 4)
+        self.main_layout.setStretchFactor(log_area, 1)
 
         # --- Finalize Layout ---
-        self.central.setLayout(self.main_layout)
-        self.setCentralWidget(self.central)
+        self.central.setLayout(self.main_layout) # Apply the main layout to the central widget
+        self.setCentralWidget(self.central) # Set the central widget for the main window
 
-        # --- Initial UI State Setup ---
-        if hasattr(self, 'template_combo'):
-            self._update_hidden_layer_input(self.template_combo.currentText())
+        # --- Initialize Application State ---
+        # self._populate_model_dropdown() # REMOVE - Already called in _create_training_group
+        # Add connections that depend on multiple UI parts being created
+        self.image_col_input.valueChanged.connect(self._update_image_col_type_state)
+        self._update_image_col_type_state() # Set initial state of image type combo
+        self.scan_datasets() # Find available datasets on startup
+        self.populate_dataset_dropdown() # Populate dropdown AFTER scanning
 
-    # --- Initialization Helper ---
     def _init_attributes(self):
-        """Initialize core attributes for the main window."""
-        # Model parameters
-        self.model_params = None
-        self.current_num_classes = 0
+        # Initialize attributes to store application state
+        self.datasets_info: Dict[str, Dict[str, Any]] = {} # Discovered dataset paths and types
+        self.current_dataset: Optional[np.ndarray] = None
+        self.current_labels: Optional[np.ndarray] = None
+        self.current_dataset_name: Optional[str] = None
+        self.num_classes: int = 0 # Number of classes in the loaded dataset
+        self.model_params: Optional[tuple] = None # Stores trained weights and biases (W1, b1, W2, b2)
+        self.training_worker: Optional[TrainingWorker] = None
+        self.training_thread: Optional[QThread] = None
+        self.train_loss_history: List[float] = []
+        self.val_accuracy_history: List[float] = []
 
-        # Training data
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
-        self.train_loss_history = []
-        self.val_accuracy_history = []
-
-        # Threading
-        self.training_thread = None
-        self.training_worker = None
-
-        # QuickDraw specific
-        self.quickdraw_category_map = {}
-        self.num_quickdraw_classes = 0
-        self.quickdraw_files_map = {}
-
-        # Model Templates Definition
-        self.model_templates = {
-            "Simple MLP (10 Hidden)": 10,
-            "Wider MLP (50 Hidden)": 50,
-            "Deep Narrow (5 Hidden)": 5,
-            "(Custom)": -1
-        }
-
-    # --- UI Creation Helper Methods ---
+    # --- UI Group Creation Methods --- #
 
     def _create_dataset_group(self):
-        """Creates the Dataset Selection group box and its widgets."""
-        group = QGroupBox("Dataset Selection")
-        v_layout = QVBoxLayout()
+        """Creates the GroupBox containing dataset selection and loading widgets."""
+        dataset_group = QGroupBox("Dataset Loading")
+        # QFormLayout is convenient for label-widget pairs
+        form_layout = QFormLayout()
 
-        # Row 1: Combo box and Load button
-        load_layout = QHBoxLayout()
-        self.dataset_label = QLabel("Select/Upload Dataset:")
-        load_layout.addWidget(self.dataset_label)
-        self.dataset_combo = QComboBox()
-        load_layout.addWidget(self.dataset_combo)
-        self.load_dataset_button = QPushButton("💾 Load Selected")
+        # Dropdown for selecting pre-discovered datasets
+        self.dataset_dropdown = QComboBox()
+        self.dataset_dropdown.setToolTip("Select a dataset automatically found in the 'data' directory")
+        # When the selection changes, update the UI state
+        self.dataset_dropdown.currentIndexChanged.connect(self._on_dataset_selected)
+        form_layout.addRow("Select Dataset:", self.dataset_dropdown)
+
+        # Button to load the dataset chosen in the dropdown
+        self.load_dataset_button = QPushButton("Load Selected")
+        self.load_dataset_button.setToolTip("Load the dataset chosen in the dropdown above")
+        # Connect the button click to the loading function
         self.load_dataset_button.clicked.connect(self.load_selected_dataset)
-        load_layout.addWidget(self.load_dataset_button)
-        v_layout.addLayout(load_layout)
+        # Add the button directly below the dropdown (spanning both columns of the form layout)
+        form_layout.addRow(self.load_dataset_button)
 
-        # Row 2: Upload button and Column indices/type
-        upload_layout = QHBoxLayout()
-        self.upload_dataset_button = QPushButton("📁 Upload CSV")
-        self.upload_dataset_button.clicked.connect(self.upload_csv_dataset)
-        upload_layout.addWidget(self.upload_dataset_button)
+        # --- Widgets for Custom CSV Upload --- #
+        # Add a horizontal line separator for visual clarity
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        form_layout.addRow(separator)
 
-        # Label Col
-        self.label_col_label = QLabel("Label Col Idx:")
-        upload_layout.addWidget(self.label_col_label)
+        # Button to open a file dialog for uploading a CSV
+        upload_button = QPushButton("Upload Custom CSV")
+        upload_button.setToolTip("Upload your own CSV (pixels, base64 images, or image paths)")
+        upload_button.clicked.connect(self.upload_csv_dataset)
+        form_layout.addRow("Load Custom:", upload_button)
+
+        # Input for specifying the label column index in the custom CSV
         self.label_col_input = QSpinBox()
-        self.label_col_input.setRange(-1, 1000)
-        self.label_col_input.setToolTip("0-based index of the label column.")
-        self.label_col_input.setValue(0)      # Default to 0 (MNIST format)
-        upload_layout.addWidget(self.label_col_input)
+        self.label_col_input.setRange(0, 1000) # Allow columns 0 to 1000
+        self.label_col_input.setValue(0) # Default to the first column (index 0)
+        self.label_col_input.setToolTip("Index (0-based) of the column containing the labels in your CSV")
+        form_layout.addRow("Label Col Idx:", self.label_col_input)
 
-        # Image Col
-        self.image_col_label = QLabel("Image Col Idx:")
-        upload_layout.addWidget(self.image_col_label)
+        # Input for specifying the image data column index (if not using raw pixels)
         self.image_col_input = QSpinBox()
-        self.image_col_input.setRange(-1, 1000)
-        self.image_col_input.setValue(-1)
-        self.image_col_input.setToolTip("0-based index of image column (base64/path), or -1 to use pixel columns.")
-        self.image_col_input.valueChanged.connect(self._update_image_col_type_state)
-        upload_layout.addWidget(self.image_col_input)
+        self.image_col_input.setRange(-1, 1000) # Allow -1 to indicate pixel mode
+        self.image_col_input.setValue(-1) # Default to -1 (pixel mode)
+        self.image_col_input.setToolTip("Index of image data column (base64/path). Set to -1 if columns contain raw pixel values.")
+        form_layout.addRow("Image Col Idx:", self.image_col_input)
 
-        # Image Type
-        self.image_type_label = QLabel("Type:")
-        upload_layout.addWidget(self.image_type_label)
+        # Dropdown to specify the type of data in the image column (base64 or path)
         self.image_type_combo = QComboBox()
-        self.image_type_combo.addItems(["(Not Applicable)", "base64", "path"])
-        self.image_type_combo.setToolTip("Select 'base64' or 'path' if using an Image Column.")
-        self.image_type_combo.setEnabled(False)
-        upload_layout.addWidget(self.image_type_combo)
+        self.image_type_combo.addItems(["(Not Applicable)", "base64", "path"]) # Add options
+        self.image_type_combo.setToolTip("Select 'base64' or 'path' if Image Col Idx is >= 0")
+        self.image_type_combo.setEnabled(False) # Disabled by default (until Image Col Idx changes)
+        form_layout.addRow("Type:", self.image_type_combo)
+        # ------------------------------------ #
 
-        upload_layout.addStretch()
-        v_layout.addLayout(upload_layout)
+        # Scan for datasets initially (the dropdown will be populated later)
+        # self.populate_dataset_dropdown() # Moved to end of __init__ after log is ready
+        dataset_group.setLayout(form_layout) # Apply the form layout to the group box
+        return dataset_group
 
-        # Populate dropdown only after all relevant widgets are created
-        self.populate_dataset_dropdown()
-
-        group.setLayout(v_layout)
-        return group
-
-    def _create_inference_group(self):
-        """Creates the Inference group box and its widgets."""
-        group = QGroupBox("Model Testing (Inference)")
+    def _create_training_group(self):
+        """Creates the GroupBox for training configuration widgets."""
+        # QGroupBox visually groups related widgets.
+        training_group = QGroupBox("Training Controls (No dataset loaded)")
+        # Use a QVBoxLayout for arranging controls vertically within the group box.
         layout = QVBoxLayout()
 
-        # Add explanatory text
+        # Layout for Model Template selection (Label + Dropdown)
+        model_layout = QHBoxLayout()
+        model_label = QLabel("Model Template:")
+        model_layout.addWidget(model_label)
+        self.template_combo = QComboBox()
+        # Populate the dropdown with predefined templates (and sizes)
+        self.template_combo.setToolTip("Select a model structure or choose 'Custom'")
+        # When the user changes the template, call _update_hidden_layer_input to enable/disable the custom size input
+        self.template_combo.currentIndexChanged[str].connect(self._update_hidden_layer_input)
+        model_layout.addWidget(self.template_combo)
+        model_layout.addStretch()
+        layout.addLayout(model_layout)
+
+        # Layout for Custom Hidden Layer Size (Label + SpinBox)
+        hidden_layout = QHBoxLayout()
+        hidden_label = QLabel("Hidden Layer Neurons:")
+        hidden_layout.addWidget(hidden_label)
+        self.hidden_layer_input = QSpinBox()
+        self.hidden_layer_input.setRange(1, 10000) # Allow 1 to 10000 neurons
+        self.hidden_layer_input.setValue(10) # Default value
+        self.hidden_layer_input.setToolTip("Number of neurons in the hidden layer (if template is 'Custom')")
+        self.hidden_layer_input.setEnabled(False) # Disabled by default, enabled if "(Custom)" is selected
+        hidden_layout.addWidget(self.hidden_layer_input)
+        hidden_layout.addStretch()
+        layout.addLayout(hidden_layout)
+
+        # Now populate the dropdown and set initial state after hidden_layer_input exists
+        self._populate_model_dropdown()
+
+        # Layout for Training Hyperparameters (Epochs, Learning Rate, Patience)
+        param_layout = QFormLayout() # Form layout for label-widget pairs
+        self.epochs_input = QSpinBox()
+        self.epochs_input.setRange(1, 10000)
+        self.epochs_input.setValue(50) # Default epochs
+        self.epochs_input.setToolTip("Number of passes through the entire training dataset")
+        param_layout.addRow("Epochs:", self.epochs_input)
+
+        self.lr_input = QDoubleSpinBox() # Use QDoubleSpinBox for floating point learning rate
+        self.lr_input.setRange(0.00001, 1.0)
+        self.lr_input.setSingleStep(0.001)
+        self.lr_input.setDecimals(5) # Show more precision
+        self.lr_input.setValue(0.01) # Default learning rate
+        self.lr_input.setToolTip("Learning Rate (alpha): Step size for weight updates during training")
+        param_layout.addRow("Learning Rate:", self.lr_input)
+
+        self.patience_input = QSpinBox()
+        self.patience_input.setRange(0, 100) # 0 means no early stopping
+        self.patience_input.setValue(5) # Default patience
+        self.patience_input.setToolTip("Early Stopping Patience: Stop training if validation accuracy doesn't improve for this many checks (0 to disable)")
+        param_layout.addRow("Patience:", self.patience_input)
+
+        layout.addLayout(param_layout)
+
+        # Training Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        # Layout for Start/Stop Training Buttons
+        button_layout = QHBoxLayout()
+        self.train_button = QPushButton("🚀 Start Training")
+        self.train_button.clicked.connect(self.start_training)
+        self.train_button.setEnabled(False) # Disabled until a dataset is loaded
+        button_layout.addWidget(self.train_button)
+
+        self.stop_button = QPushButton("🛑 Stop Training")
+        self.stop_button.clicked.connect(self._stop_training)
+        self.stop_button.setEnabled(False) # Disabled until training starts
+        button_layout.addWidget(self.stop_button)
+        layout.addLayout(button_layout)
+
+        # Apply the arrangement of widgets (layout) to the group box
+        training_group.setLayout(layout)
+        return training_group
+
+    def _create_model_mgmt_group(self):
+        """Creates the GroupBox for saving and loading model weights."""
+        mgmt_group = QGroupBox("Model Management")
+        # Simple horizontal layout for the save/load buttons
+        layout = QHBoxLayout()
+
+        self.save_button = QPushButton("💾 Save Weights")
+        self.save_button.setToolTip("Save the current model weights and biases to a .npz file")
+        # Connect the button click to the save_weights method (removed underscore)
+        self.save_button.clicked.connect(self.save_weights)
+        # Initially disabled, enabled after training finishes or weights are loaded
+        self.save_button.setEnabled(False)
+        layout.addWidget(self.save_button)
+
+        self.load_button = QPushButton("📂 Load Weights")
+        self.load_button.setToolTip("Load previously saved model weights and biases from a .npz file")
+        # Connect the button click to the load_weights method (removed underscore)
+        self.load_button.clicked.connect(self.load_weights)
+        layout.addWidget(self.load_button)
+
+        layout.addStretch() # Push buttons to the left
+        mgmt_group.setLayout(layout)
+        return mgmt_group
+
+    def _create_inference_group(self):
+        """Creates the GroupBox containing widgets for testing the model (inference)."""
+        # Renamed this group box to be more descriptive
+        inference_group = QGroupBox("Model Testing (Inference)")
+        # Main vertical layout for this section
+        layout = QVBoxLayout()
+
+        # Add explanatory text at the top to guide the user
         info_label = QLabel(
             "Use this section to test the currently trained or loaded model on new data. "
             "You can either select an image file or draw a digit yourself."
         )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("font-style: italic; padding-bottom: 10px;")
+        info_label.setWordWrap(True) # Allow text to wrap to multiple lines
+        info_label.setStyleSheet("font-style: italic; padding-bottom: 10px;") # Add some style
         layout.addWidget(info_label)
 
         # --- Test with File Section ---
+        # Horizontal layout for the file selection label and button
         file_test_layout = QHBoxLayout()
         file_label = QLabel("Test with Image File:")
         file_test_layout.addWidget(file_label)
+        # Button to trigger the file dialog and prediction process
         self.predict_file_button = QPushButton("Select & Predict File")
         self.predict_file_button.setToolTip("Load an image file (e.g., PNG, JPG) for prediction")
+        # Connect click to the method handling file prediction
         self.predict_file_button.clicked.connect(self._predict_image_file)
         file_test_layout.addWidget(self.predict_file_button)
-        file_test_layout.addStretch()
+        file_test_layout.addStretch() # Push elements left
         layout.addLayout(file_test_layout)
 
         # --- Test with Drawing Section ---
+        # Horizontal layout to place the canvas next to its controls
         drawing_test_layout = QHBoxLayout()
-        self.drawing_canvas = DrawingCanvas(width=140, height=140, parent=self) # Provide dimensions and parent
+        # Instantiate our custom DrawingCanvas widget
+        self.drawing_canvas = DrawingCanvas(width=140, height=140, parent=self)
         drawing_test_layout.addWidget(self.drawing_canvas)
 
+        # Vertical layout for the Predict and Clear buttons next to the canvas
         drawing_buttons_layout = QVBoxLayout()
         predict_drawing_button = QPushButton("Predict Drawing")
         predict_drawing_button.setToolTip("Predict the digit currently drawn on the canvas")
+        # Connect click to the method handling drawing prediction
         predict_drawing_button.clicked.connect(self._predict_drawing)
         drawing_buttons_layout.addWidget(predict_drawing_button)
 
         clear_button = QPushButton("Clear Canvas")
+        # Connect click to the drawing canvas's own clearCanvas method
         clear_button.clicked.connect(self.drawing_canvas.clearCanvas)
         drawing_buttons_layout.addWidget(clear_button)
-        drawing_buttons_layout.addStretch()
+        drawing_buttons_layout.addStretch() # Push buttons up
         drawing_test_layout.addLayout(drawing_buttons_layout)
         layout.addLayout(drawing_test_layout)
 
         # --- Results Display Section ---
+        # Horizontal layout for the image preview and the probability graph
         results_layout = QHBoxLayout()
+        # QLabel used to display the input image (either loaded file or drawing)
         self.image_preview_label = QLabel("Image Preview Here")
-        self.image_preview_label.setAlignment(Qt.AlignCenter)
-        self.image_preview_label.setMinimumSize(100, 100)
-        self.image_preview_label.setStyleSheet("border: 1px solid gray; background-color: white;")
+        self.image_preview_label.setAlignment(Qt.AlignCenter) # Center the placeholder text/image
+        self.image_preview_label.setMinimumSize(100, 100) # Ensure it has some size
+        self.image_preview_label.setStyleSheet("border: 1px solid gray; background-color: white;") # Add border and background
         results_layout.addWidget(self.image_preview_label)
+
+        # Instantiate our custom ProbabilityBarGraph widget to show prediction confidence
         self.probability_graph = ProbabilityBarGraph()
         results_layout.addWidget(self.probability_graph)
         layout.addLayout(results_layout)
 
-        group.setLayout(layout)
-        return group
-
-    def _create_training_group(self):
-        """Creates the Training Controls group box and its widgets."""
-        # Assign to self.training_group so title can be updated later
-        self.training_group = QGroupBox("Training Controls (No dataset loaded)")
-        layout = QVBoxLayout()
-
-        # Template Selection
-        template_layout = QHBoxLayout()
-        self.template_label = QLabel("Model Template:")
-        template_layout.addWidget(self.template_label)
-        self.template_combo = QComboBox()
-        self.template_combo.addItems(self.model_templates.keys())
-        self.template_combo.currentTextChanged.connect(self._update_hidden_layer_input)
-        template_layout.addWidget(self.template_combo)
-        layout.addLayout(template_layout)
-
-        # Form for hyperparameters
-        form_layout = QFormLayout()
-        self.hidden_layer_input = QSpinBox()
-        self.hidden_layer_input.setRange(1, 1000)
-        # Set initial value based on first template
-        first_template_name = list(self.model_templates.keys())[0]
-        self.hidden_layer_input.setValue(self.model_templates[first_template_name])
-        self.hidden_layer_input.setToolTip("Number of neurons in the hidden layer.")
-        form_layout.addRow("Hidden Layer Size:", self.hidden_layer_input)
-
-        self.epochs_input = QSpinBox()
-        self.epochs_input.setRange(1, 10000)
-        self.epochs_input.setValue(100)
-        form_layout.addRow("Epochs:", self.epochs_input)
-
-        self.lr_input = QDoubleSpinBox()
-        self.lr_input.setDecimals(4)
-        self.lr_input.setRange(0.0001, 1.0)
-        self.lr_input.setSingleStep(0.01)
-        self.lr_input.setValue(0.1)
-        form_layout.addRow("Learning Rate:", self.lr_input)
-
-        self.patience_input = QSpinBox()
-        self.patience_input.setRange(0, 1000)
-        self.patience_input.setValue(0)
-        self.patience_input.setToolTip("Stop training if validation accuracy doesn't improve for this many checks (0=disabled).")
-        form_layout.addRow("Early Stopping Patience:", self.patience_input)
-        layout.addLayout(form_layout)
-
-        # Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        # Buttons
-        button_layout = QHBoxLayout()
-        self.train_button = QPushButton("🚀 Start Training")
-        self.train_button.clicked.connect(self.start_training)
-        button_layout.addWidget(self.train_button)
-
-        layout.addLayout(button_layout)
-
-        self.training_group.setLayout(layout)
-        return self.training_group
-
-    def _create_model_mgmt_group(self):
-        """Creates the Model Management group box and its widgets."""
-        group = QGroupBox("Model Management")
-        layout = QHBoxLayout()
-
-        self.save_weights_button = QPushButton("💾 Save Weights")
-        self.save_weights_button.clicked.connect(self.save_weights)
-        layout.addWidget(self.save_weights_button)
-
-        self.load_weights_button = QPushButton("📂 Load Weights")
-        self.load_weights_button.clicked.connect(self.load_weights)
-        layout.addWidget(self.load_weights_button)
-
-        group.setLayout(layout)
-        return group
+        # Apply the main vertical layout to the group box
+        inference_group.setLayout(layout)
+        return inference_group
 
     def _create_log_area(self):
         """Creates the QTextEdit widget for logging."""
@@ -469,100 +407,139 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         return self.log
 
-    # --- End UI Creation Helper Methods ---
+    # --- End UI Group Creation Methods --- #
 
-    # --- Slot to handle template selection changes ---
+    # --- UI Update / Helper Methods --- #
+
+    def _populate_model_dropdown(self):
+        """Populates the model template dropdown."""
+        # Defines common model configurations the user can select.
+        # The value is the number of hidden neurons, -1 indicates custom.
+        self.model_templates = {
+            "Simple MLP (10 Hidden)": 10,
+            "Wider MLP (50 Hidden)": 50,
+            "Deep Narrow (5 Hidden)": 5,
+            "(Custom)": -1 # Special value for custom input
+        }
+        self.template_combo.addItems(self.model_templates.keys())
+        # Set initial state based on the first template
+        first_template_name = list(self.model_templates.keys())[0]
+        self._update_hidden_layer_input(first_template_name)
+
     def _update_hidden_layer_input(self, template_name):
-        if template_name in self.model_templates:
-            size = self.model_templates[template_name]
-            is_custom = (template_name == "(Custom)")
-
-            # Enable/disable the input field
-            self.hidden_layer_input.setEnabled(is_custom)
-
-            # Update the value if a non-custom template is selected
-            if not is_custom and size > 0:
-                self.hidden_layer_input.setValue(size)
-            elif not is_custom and size <= 0: # Should not happen with current templates
-                self._log_message(f"Warning: Template '{template_name}' has invalid size {size}. Using default.")
-                self.hidden_layer_input.setValue(10) # Fallback
-            # When switching to custom, leave the current value as is
-
-            # Log change
-            mode = "(Custom)" if is_custom else f"Template '{template_name}' ({size} hidden neurons)"
-            self._log_message(f"Model configuration set to: {mode}")
-            # Re-initialize model if data is already loaded
-            if self.X_train is not None:
-                 self._log_message("Dataset loaded. Re-initializing model for new hidden layer size.")
-                 self._post_load_update(self.dataset_combo.currentText()) # Trigger re-init
-        # ----------------------------------------------
-
-    # --- New method to populate dataset dropdown ---
-    def populate_dataset_dropdown(self):
-        self.dataset_combo.clear() # Clear existing items
-        self.quickdraw_category_map = {} # Reset map: display_name -> index
-        self.quickdraw_files_map = {}    # Reset map: display_name -> path
-        self.num_quickdraw_classes = 0   # Reset count
-        current_qd_index = 0            # Start indexing QD classes from 0
-        found_datasets = []             # Temp list to hold names for sorting
-
-        self._log_message("Scanning for datasets...")
-
-        # 1. Check for built-in MNIST
-        mnist_path = "data/train.csv"
-        if os.path.exists(mnist_path):
-            found_datasets.append("MNIST")
-            self._log_message(f"Found built-in: MNIST ({mnist_path})")
+        """Enables/disables the hidden layer size input based on template selection."""
+        # If the user selects "(Custom)", enable the spinbox, otherwise disable it and set its value.
+        is_custom = False # Flag to track if custom is selected
+        if template_name == "(Custom)":
+            is_custom = True
+            self.hidden_layer_input.setEnabled(True)
         else:
-             self._log_message(f"WARN: MNIST dataset not found at {mnist_path}")
+            # is_custom remains False
+            self.hidden_layer_input.setEnabled(False)
+            # Set the spinbox value to match the selected template's hidden layer size
+            if template_name in self.model_templates:
+                # Check if the value is valid (not -1 which indicates 'Custom') before setting
+                size = self.model_templates[template_name]
+                # Update the value if a non-custom template is selected
+                if not is_custom and size > 0:
+                    self.hidden_layer_input.setValue(size)
+                elif not is_custom and size <= 0: # Should not happen with current templates
+                    self._log_message(f"Warning: Template '{template_name}' has invalid size {size}. Using default.")
+                    self.hidden_layer_input.setValue(10) # Fallback
+                # When switching to custom, leave the current value as is
 
-        # 2. Check for built-in Emojis
-        emoji_path = "data/emojis.csv"
-        if os.path.exists(emoji_path):
-            found_datasets.append("Emojis")
-            self._log_message(f"Found built-in: Emojis ({emoji_path})")
-        else:
-            self._log_message(f"WARN: Emojis dataset not found at {emoji_path}")
+        # Log change
+        mode = "(Custom)" if is_custom else f"Template '{template_name}' ({self.hidden_layer_input.value()} hidden neurons)"
+        self._log_message(f"Model configuration set to: {mode}")
 
-        # 3. Scan data/quickdraw for .npy files
-        quickdraw_dir = "data/quickdraw/"
-        if os.path.isdir(quickdraw_dir):
-            npy_files = sorted(glob.glob(os.path.join(quickdraw_dir, "*.npy"))) # Sort for consistent indexing
-            if npy_files:
-                 self._log_message(f"Found {len(npy_files)} QuickDraw datasets in {quickdraw_dir}:")
-                 self.num_quickdraw_classes = len(npy_files)
-                 for npy_path in npy_files:
-                     # Extract category name (e.g., 'cat' from 'data/quickdraw/cat.npy')
-                     category_name = os.path.splitext(os.path.basename(npy_path))[0]
-                     display_name = f"QuickDraw: {category_name}"
-                     # Map display name to its index and store
-                     self.quickdraw_category_map[display_name] = current_qd_index
-                     self.quickdraw_files_map[display_name] = npy_path # Store path
-                     found_datasets.append(display_name)
-                     self._log_message(f"  - {display_name} (Index: {current_qd_index}, Path: {npy_path})")
-                     current_qd_index += 1
-                 # Add the combined option if multiple QD files were found
-                 if self.num_quickdraw_classes > 1:
-                     found_datasets.append("QuickDraw: All Categories")
-                     self._log_message(f"Added 'QuickDraw: All Categories' option ({self.num_quickdraw_classes} classes)")
+        # Re-initialize model if data is already loaded and a valid template/custom size is set
+        if hasattr(self, 'current_dataset') and self.current_dataset is not None:
+            # Check if the current hidden layer setting makes sense before re-initializing
+            current_hidden_size = self.hidden_layer_input.value()
+            if current_hidden_size > 0:
+                self._log_message("Dataset loaded. Re-initializing model for new configuration.")
+                # Call _reinitialize_model instead of _post_load_update to avoid reloading data
+                self._reinitialize_model()
             else:
-                 self._log_message(f"No .npy files found in {quickdraw_dir}")
+                self._log_message("Warning: Cannot re-initialize model with current configuration (hidden size <= 0?).")
+
+    def _update_image_col_type_state(self, value=None):
+        """Enables/disables the image type combo box based on image col index."""
+        # Called when the 'Image Col Idx' spinbox value changes.
+        # If the index is >= 0 (meaning a specific column is chosen), enable the Type dropdown.
+        # Otherwise (if index is -1, meaning pixel mode), disable it.
+        img_col_idx = self.image_col_input.value()
+        is_image_col_mode = (img_col_idx >= 0)
+        self.image_type_combo.setEnabled(is_image_col_mode)
+        if not is_image_col_mode:
+            self.image_type_combo.setCurrentIndex(0) # Reset to "(Not Applicable)"
+
+    def scan_datasets(self):
+        """Scans the 'data' directory for known dataset types and populates the dropdown."""
+        self._log_message("Scanning for datasets in 'data/' directory...")
+        self.datasets_info = {} # Reset discovered datasets
+        data_dir = "data"
+
+        # --- Check for specific known files/patterns ---
+        # MNIST Check
+        mnist_path = os.path.join(data_dir, "train.csv")
+        if os.path.exists(mnist_path):
+            self.datasets_info["MNIST (CSV)"] = {"type": "csv", "path": mnist_path}
+            self._log_message("Found MNIST dataset (train.csv)")
+
+        # Emoji Check
+        emoji_path = os.path.join(data_dir, "emojis.csv")
+        if os.path.exists(emoji_path):
+            # Add entries for different image providers within the emoji CSV
+            self.datasets_info["Emoji (CSV - Google)"] = {"type": "emoji", "path": emoji_path, "provider": "Google"}
+            self.datasets_info["Emoji (CSV - Apple)"] = {"type": "emoji", "path": emoji_path, "provider": "Apple"}
+            # Add more providers here if needed (e.g., Twitter)
+            self._log_message("Found Emoji dataset (emojis.csv)")
+
+        # QuickDraw Check
+        quickdraw_dir = os.path.join(data_dir, "quickdraw")
+        if os.path.isdir(quickdraw_dir):
+            npy_files = glob.glob(os.path.join(quickdraw_dir, "*.npy"))
+            if npy_files:
+                # Create a mapping from file path to a unique category index (0, 1, 2...)
+                npy_map = {path: i for i, path in enumerate(sorted(npy_files))}
+                self.datasets_info["QuickDraw (Multiple NPY)"] = {"type": "quickdraw", "npy_map": npy_map}
+                self._log_message(f"Found {len(npy_files)} QuickDraw NPY files.")
+            else:
+                self._log_message(f"No .npy files found in {quickdraw_dir}")
         else:
             self._log_message(f"QuickDraw directory not found: {quickdraw_dir}")
 
-        # TODO: Add scanning for other dataset types/locations if needed
+        # self.populate_dataset_dropdown() # REMOVE call from here
 
-        # Populate dropdown from sorted list
-        if found_datasets:
-            for name in found_datasets:
-                self.dataset_combo.addItem(name)
-            self.dataset_combo.setEnabled(True)
-            self.load_dataset_button.setEnabled(True)
-        else:
-             self._log_message("ERROR: No datasets found! Cannot train.")
-             self.dataset_combo.addItem("No Datasets Found")
-             self.dataset_combo.setEnabled(False)
+    # --- New method to populate dataset dropdown ---
+    def _on_dataset_selected(self):
+        """Slot called when the user selects a dataset in the dropdown."""
+        # Generally enables the load button if a valid dataset is selected
+        selected_text = self.dataset_dropdown.currentText()
+        # Check if the selected text is one of the keys in our discovered datasets info
+        is_valid_selection = selected_text in self.datasets_info
+        # Enable the button only if the selection is valid
+        self.load_dataset_button.setEnabled(is_valid_selection)
+
+    def populate_dataset_dropdown(self):
+        self._log_message("Populating dataset dropdown...")
+        self.dataset_dropdown.clear() # Clear existing items
+
+        if not self.datasets_info:
+             self._log_message("ERROR: No datasets found by scan! Cannot train.")
+             self.dataset_dropdown.addItem("No Datasets Found")
+             self.dataset_dropdown.setEnabled(False)
              self.load_dataset_button.setEnabled(False)
+        else:
+            # Populate dropdown from the keys found by scan_datasets
+            dataset_names = sorted(self.datasets_info.keys())
+            self._log_message(f"Found datasets: {dataset_names}")
+            for name in dataset_names:
+                self.dataset_dropdown.addItem(name)
+            self.dataset_dropdown.setEnabled(True)
+            # Let _on_dataset_selected handle enabling the load button initially
+            self._on_dataset_selected()
 
     # --- End new method ---
 
@@ -572,22 +549,48 @@ class MainWindow(QMainWindow):
         self.log.append(f"[{timestamp}] {message}")
         QApplication.processEvents() # Keep UI responsive
 
-    # Modify the progress update slot
-    def _update_progress(self, current_iteration, total_iterations):
-        # Update progress bar based on iterations
-        self.progress_bar.setValue(current_iteration)
+    # Modify the progress update slot to only accept percentage
+    def _update_progress(self, percentage_complete):
+        # Update progress bar based on percentage from worker
+        self.progress_bar.setValue(percentage_complete)
         # QApplication.processEvents() # Generally avoid in slots connected to threads
 
     # New slots to handle signals from the worker
     def _handle_training_finished(self, results):
-        self._log_message("Training finished successfully. Updating model parameters.")
-        # Unpack results
+        if results is None:
+            self._log_message("Training finished with errors or was stopped.")
+            # Optionally reset plot, etc., if needed
+            # self.training_plot_widget.clear_plot() # Example
+            # Ensure UI state is reset correctly by _cleanup_thread
+            self._cleanup_thread() # Make sure cleanup happens
+            return
+
+        self._log_message("Training finished successfully. Updating model parameters and plot.")
+        # Unpack results - Ensure results is not None before unpacking
+        # ... (rest of the code assumes results is not None)
         self.model_params = (results[0], results[1], results[2], results[3])
         self.train_loss_history = results[4]
         self.val_accuracy_history = results[5]
 
+        # --- Update the main plot --- #
+        if hasattr(self, 'training_plot_widget') and self.training_plot_widget:
+            self.training_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
+        else:
+            self._log_message("Warning: Could not find training_plot_widget to update.")
+
+        # --- Update expanded plot if it exists --- #
+        if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible():
+            # Find the plot widget within the dialog (assuming it's the only PlotWidget)
+            expanded_plot = self.expanded_plot_dialog.findChild(PlotWidget)
+            if expanded_plot:
+                expanded_plot.update_plot(self.train_loss_history, self.val_accuracy_history)
+            else:
+                 self._log_message("Warning: Could not find PlotWidget in expanded dialog to update.")
+
         # --- Cleanup handled by thread's finished signal connection --- # Keep this comment
         # self._cleanup_thread() # Don't call directly here, let signal handle it
+        # Enable save button now that we have trained parameters
+        self.save_button.setEnabled(True)
 
     def _handle_worker_log(self, message):
         # Simple pass-through logging for now
@@ -599,15 +602,21 @@ class MainWindow(QMainWindow):
         self._cleanup_thread()
 
     def _cleanup_thread(self):
-        self._log_message("Cleaning up training thread...")
-        if self.training_thread is not None:
-            self.training_thread.quit()
-            self.training_thread.wait()
+        """Cleans up thread/worker objects and resets UI state. Called via thread.finished signal."""
+        self._log_message("Cleaning up training thread resources...")
+        # Thread should already be finished, no need to quit/wait
+        # if self.training_thread is not None:
+        #     self.training_thread.quit()
+        #     self.training_thread.wait() 
         self.training_thread = None
         self.training_worker = None
-        self.train_button.setEnabled(True)
+        # Reset UI elements
+        self.train_button.setEnabled(True) 
+        self.stop_button.setText("Stop Training") # Reset text
+        self.stop_button.setEnabled(False)
         self.progress_bar.setVisible(False)
-        self._log_message("=== Training Run Finished/Aborted ===")
+        self.progress_bar.setValue(0) # Reset progress bar value
+        self._log_message("=== Training Thread Finished/Aborted ===")
         QApplication.processEvents()
 
     def _predict_image_file(self):
@@ -675,7 +684,7 @@ class MainWindow(QMainWindow):
              self._log_message("WARN: Training is already in progress.")
              return
 
-        self._log_message(f"=== Starting Training Thread for {self.dataset_combo.currentText()} ===")
+        self._log_message(f"=== Starting Training Thread for {self.dataset_dropdown.currentText()} ===") # Use dataset_dropdown
         self.train_button.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -690,33 +699,68 @@ class MainWindow(QMainWindow):
         # --- Threading Setup --- 
         self.training_thread = QThread() # Create a new thread
         # Create worker instance with necessary data
+        if self.model_params is None:
+            self._log_message("ERROR: Model parameters are not initialized. Cannot start training.")
+            self.train_button.setEnabled(True) # Re-enable train button
+            self.stop_button.setEnabled(False)
+            self.progress_bar.setVisible(False)
+            return
+        if self.current_num_classes <= 0:
+             self._log_message("ERROR: Number of classes not determined. Cannot start training.")
+             self.train_button.setEnabled(True) # Re-enable train button
+             self.stop_button.setEnabled(False)
+             self.progress_bar.setVisible(False)
+             return
+
+        W1_init, b1_init, W2_init, b2_init = self.model_params
+
         self.training_worker = TrainingWorker(
             self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-            learning_rate, epochs, self.model_params,
-            patience # Pass patience value
+            W1_init, b1_init, W2_init, b2_init, # Pass initial weights/biases
+            epochs,         # Pass epochs
+            learning_rate,  # Pass learning rate as alpha
+            self.current_num_classes, # Pass number of classes
+            patience        # Pass patience value
         )
         # Move worker to the thread
         self.training_worker.moveToThread(self.training_thread)
 
         # --- Connect Signals and Slots ---
         # Connect worker signals to main window slots
-        self.training_worker.progress_updated.connect(self._update_progress)
-        self.training_worker.training_finished.connect(self._handle_training_finished)
+        self.training_worker.progress.connect(self._update_progress)
+        self.training_worker.finished.connect(self._handle_training_finished)
         self.training_worker.log_message.connect(self._handle_worker_log)
-        self.training_worker.error_occurred.connect(self._handle_worker_error)
 
         # Connect thread signals
-        self.training_thread.started.connect(self.training_worker.run_training) # Run worker task when thread starts
-        self.training_worker.training_finished.connect(self.training_thread.quit)
-        self.training_worker.error_occurred.connect(self.training_thread.quit)
-        self.training_thread.finished.connect(self.training_worker.deleteLater) # Schedule worker for deletion
-        self.training_thread.finished.connect(self.training_thread.deleteLater) # Schedule thread for deletion
+        self.training_thread.started.connect(self.training_worker.run)
+        self.training_worker.finished.connect(self.training_thread.quit)
+        self.training_worker.finished.connect(self.training_worker.deleteLater) # Schedule worker for deletion
+        self.training_thread.finished.connect(self._cleanup_thread) # Connect thread finished to cleanup slot
         # We handle UI cleanup in _cleanup_thread via _handle_training_finished/_handle_worker_error
         # --- End Signal/Slot Connections --- 
 
         # Start the thread
         self.training_thread.start()
         self._log_message("Training thread started.")
+
+    def _stop_training(self):
+        """Signals the running training thread to stop gracefully."""
+        if self.training_thread is not None and self.training_thread.isRunning():
+            if self.training_worker is not None:
+                self._log_message("--- Stop training requested by user --- ")
+                # Signal the worker to stop
+                self.training_worker.stop() 
+                # Update UI immediately to show stopping state
+                self.stop_button.setText("Stopping...")
+                self.stop_button.setEnabled(False)
+                self.train_button.setEnabled(False)
+                # DO NOT call cleanup/wait here - let the finished signal handle it
+            else:
+                self._log_message("Stop requested, but worker object not found.")
+                # Fallback cleanup if worker is somehow None but thread is running
+                self._cleanup_thread()
+        else:
+            self._log_message("Stop requested, but no training thread is currently running.")
 
     # Add write method to handle stdout redirection for logging
     def write(self, text):
@@ -738,33 +782,59 @@ class MainWindow(QMainWindow):
 
     # Add methods for dataset loading buttons
     def load_selected_dataset(self):
-        selected_dataset = self.dataset_combo.currentText()
-        self._log_message(f"--- Loading Dataset: {selected_dataset} ---")
-        # Get label column index from UI (primarily for non-predefined, but useful if defaults change)
-        label_col_idx = self.label_col_input.value()
+        selected_dataset_key = self.dataset_dropdown.currentText()
+        if selected_dataset_key == "No Datasets Found":
+            self._log_message("No dataset selected.")
+            return
 
-        # --- Dispatch to specific loading handlers ---
-        if selected_dataset == "MNIST":
-            self._handle_load_mnist(label_col_idx)
-        elif selected_dataset == "QuickDraw: All Categories":
-            self._handle_load_quickdraw_all()
-        elif selected_dataset.startswith("QuickDraw: "):
-            self._handle_load_quickdraw_single(selected_dataset)
-        elif selected_dataset == "Emojis":
-            self._handle_load_emojis()
+        if selected_dataset_key not in self.datasets_info:
+             self._log_message(f"ERROR: Selected dataset '{selected_dataset_key}' not found in scanned info. Rescan might be needed.")
+             # Optionally disable buttons again?
+             # self.load_dataset_button.setEnabled(False)
+             return
+
+        self._log_message(f"--- Loading Dataset: {selected_dataset_key} --- ")
+        dataset_info = self.datasets_info[selected_dataset_key]
+        dataset_type = dataset_info.get("type")
+        dataset_path = dataset_info.get("path")
+        label_col_idx = self.label_col_input.value() # Get from UI for CSV
+
+        # --- Dispatch based on type stored in datasets_info ---
+        if dataset_type == "csv":
+             self._log_message(f"Loading CSV from: {dataset_path}")
+             # Pass default validation split, assumes standard CSV layout (label col 0, pixel data)
+             # Custom CSV uploads are handled by upload_csv_dataset method
+             self._load_csv_internal(selected_dataset_key, dataset_path, label_col_idx=0)
+        elif dataset_type == "emoji":
+             provider = dataset_info.get("provider", "Google") # Default to Google if not specified
+             self._log_message(f"Loading Emojis ({provider}) from: {dataset_path}")
+             self._load_emoji_internal(selected_dataset_key, dataset_path, image_col=provider)
+        elif dataset_type == "quickdraw":
+             npy_map = dataset_info.get("npy_map")
+             if npy_map:
+                 self._log_message(f"Loading QuickDraw (Multiple NPY) - {len(npy_map)} categories")
+                 # Pass validation_split (using default 0.1 from datasets.py for NPY)
+                 self._load_multiple_npy_internal(selected_dataset_key, npy_map)
+             else:
+                 self._log_message("ERROR: QuickDraw type selected, but no npy_map found in dataset info.")
         else:
-            self._handle_load_unknown(selected_dataset)
+            self._log_message(f"ERROR: Unknown dataset type '{dataset_type}' for '{selected_dataset_key}'. Cannot load.")
+            # Handle unknown types or specific cases if needed
 
-        self._log_message("--- Dataset Loading Finished ---")
+        self._log_message("--- Dataset Loading Attempt Finished --- ")
 
-    # --- Dataset Loading Handlers (Called by load_selected_dataset) ---
+    # --- Dataset Loading Handlers (Called by load_selected_dataset or upload) ---
 
     def _handle_load_mnist(self, label_col_idx):
+        # This specific handler is now likely OBSOLETE because loading is based on
+        # self.datasets_info type. Keeping it for reference, but it won't be called
+        # by the refactored load_selected_dataset.
         """Handles loading the predefined MNIST dataset."""
         csv_path = "data/train.csv"
         self._load_csv_internal("MNIST", csv_path, label_col_idx)
 
     def _handle_load_quickdraw_all(self):
+        # OBSOLETE - Handled by type 'quickdraw' in load_selected_dataset
         """Handles loading the 'QuickDraw: All Categories' dataset."""
         selected_dataset = "QuickDraw: All Categories"
         if self.num_quickdraw_classes > 1 and self.quickdraw_files_map:
@@ -778,6 +848,8 @@ class MainWindow(QMainWindow):
             self.training_group.setTitle("Training Controls (Load failed)")
 
     def _handle_load_quickdraw_single(self, selected_dataset):
+        # OBSOLETE - Single QuickDraw files are not handled by this structure anymore.
+        # Loading multiple NPYs is the supported QuickDraw method via scan_datasets.
         """Handles loading a single QuickDraw category dataset."""
         category_name = selected_dataset.replace("QuickDraw: ", "")
         npy_path = os.path.join("data/quickdraw/", f"{category_name}.npy")
@@ -791,16 +863,18 @@ class MainWindow(QMainWindow):
             self.training_group.setTitle("Training Controls (Load failed)")
 
     def _handle_load_emojis(self):
+        # OBSOLETE - Handled by type 'emoji' in load_selected_dataset
         """Handles loading the predefined Emojis dataset."""
         emoji_path = "data/emojis.csv"
         # Pass validation_split (using default 0.1 from datasets.py for emoji)
         self._load_emoji_internal("Emojis", emoji_path)
 
     def _handle_load_unknown(self, selected_dataset):
+        # OBSOLETE - Logic is now contained within load_selected_dataset
         """Handles cases where the selected dataset is not a known predefined one."""
         self._log_message(f"WARN: Loading logic for '{selected_dataset}' not handled by predefined loaders.")
         # Attempt to treat as already loaded if it's in the combo (might be an uploaded CSV)
-        if self.X_train is not None and self.dataset_combo.currentText() == selected_dataset:
+        if self.X_train is not None and self.dataset_dropdown.currentText() == selected_dataset: # Use dataset_dropdown
             self._log_message(f"Assuming '{selected_dataset}' refers to the currently loaded (uploaded) data. No reload performed.")
             # Optionally, re-run _post_load_update to ensure consistency?
             # self._post_load_update(selected_dataset)
@@ -934,11 +1008,13 @@ class MainWindow(QMainWindow):
         # -------------------------------------------------------------
 
         # Update combo box if needed (e.g., for uploaded)
-        if self.dataset_combo.findText(dataset_name) == -1:
-            self.dataset_combo.addItem(dataset_name)
-        self.dataset_combo.setCurrentText(dataset_name)
+        if self.dataset_dropdown.findText(dataset_name) == -1: # Use dataset_dropdown
+            self.dataset_dropdown.addItem(dataset_name)        # Use dataset_dropdown
+        self.dataset_dropdown.setCurrentText(dataset_name)       # Use dataset_dropdown
         # --- Enable/disable image type based on image col input ---
         self._update_image_col_type_state()
+        # --- Enable training button --- #
+        self.train_button.setEnabled(True)
 
     # --- Add slot to update image type combo enabled state ---
     def _update_image_col_type_state(self):
@@ -947,6 +1023,11 @@ class MainWindow(QMainWindow):
         self.image_type_combo.setEnabled(not is_pixel_mode)
         if is_pixel_mode:
             self.image_type_combo.setCurrentIndex(0) # Set to "(Not Applicable)"
+        self.progress_bar.setVisible(True)
+        QApplication.processEvents()
+
+        # --- Enable Stop Button --- #
+        self.stop_button.setEnabled(True)
 
     def upload_csv_dataset(self):
         self._log_message("--- Uploading CSV Dataset --- ")

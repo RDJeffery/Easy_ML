@@ -144,13 +144,18 @@ def compute_loss(A2: np.ndarray, Y: np.ndarray) -> float:
     """Computes the cross-entropy loss.
 
     Handles potential log(0) using epsilon.
-    Determines num_classes from Y for one-hot encoding.
+    Determines num_classes from the network output A2.
     """
     m: int = Y.size
-    num_classes: int = Y.max() + 1 # Determine num_classes dynamically
-    one_hot_Y: np.ndarray = one_hot(Y, num_classes)
+    num_classes: int = A2.shape[0] # Get num_classes from network output shape
+    one_hot_Y: np.ndarray = one_hot(Y, num_classes) # Use correct num_classes
     # Add epsilon to avoid log(0)
     eps: float = 1e-10
+    # Ensure shapes match before calculation (add check?)
+    if one_hot_Y.shape[0] != A2.shape[0]:
+        print(f"ERROR: Shape mismatch in compute_loss! one_hot_Y: {one_hot_Y.shape}, A2: {A2.shape}", file=sys.stderr)
+        # Handle error appropriately, e.g., return a high loss or NaN
+        return np.nan 
     loss: float = -1 / m * np.sum(one_hot_Y * np.log(A2 + eps))
     return loss
 
@@ -216,7 +221,11 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
 
         # Call progress callback if provided (call every iteration for smooth bar)
         if progress_callback:
-            progress_callback(i + 1, iterations)
+            # Check the return value to allow early stopping via callback
+            should_continue = progress_callback(i + 1, iterations)
+            if not should_continue:
+                print(f"\n--- STOP SIGNALLED via callback at iteration {i+1} ---", file=sys.stderr)
+                break # Exit the training loop
 
         # Log progress and validation accuracy every N iterations (e.g., 10)
         if i % log_interval == 0 or i == iterations - 1:
