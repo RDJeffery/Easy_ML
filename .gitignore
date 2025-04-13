@@ -28,3 +28,16 @@ __pycache__/
 
 FUTURE_TODO.txt
 TODO.txt
+
+# PyInstaller Folders
+dist/
+build/
+
+# PyInstaller Spec File (optional, usually tracked)
+# *.spec
+
+# MacOS system files
+.DS_Store
+
+# Debugging files
+debug_processed_b64_sample_*.png
