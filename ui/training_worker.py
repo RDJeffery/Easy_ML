@@ -2,6 +2,7 @@
 
 from PyQt5.QtCore import QObject, pyqtSignal
 import numpy as np
+from typing import Dict
 # Assuming neural_net is in the model directory relative to the main script
 try:
     # This relative import might work if ui_main is run directly and model is a sibling
@@ -28,24 +29,20 @@ except ImportError:
 class TrainingWorker(QObject):
     # Signals to communicate with the main thread
     progress = pyqtSignal(int)              # Emit only percentage completion (int)
-    finished = pyqtSignal(object)           # Use object for the result tuple (W1, b1, W2, b2, loss_hist, acc_hist) or None
+    finished = pyqtSignal(object)           # Use object for the result tuple (parameters_dict, loss_hist, acc_hist) or None
     log_message = pyqtSignal(str)           # For sending log messages from worker
 
     # Removed error_occurred signal, will emit finished(None) on error instead for simplicity
 
-    def __init__(self, X_train, Y_train, X_dev, Y_dev, W1_init, b1_init, W2_init, b2_init, epochs, alpha, num_classes, patience):
+    def __init__(self, X_train, Y_train, X_dev, Y_dev, initial_parameters: Dict[str, np.ndarray], epochs: int, alpha: float, patience: int):
         super().__init__()
         self.X_train = X_train
         self.Y_train = Y_train
         self.X_dev = X_dev
         self.Y_dev = Y_dev
-        self.W1_init = W1_init
-        self.b1_init = b1_init
-        self.W2_init = W2_init
-        self.b2_init = b2_init
+        self.parameters = initial_parameters # Store the parameters dictionary
         self.epochs = epochs
         self.alpha = alpha
-        self.num_classes = num_classes
         self.patience = patience
         self._is_running = True # Flag to control the loop
 
@@ -78,10 +75,10 @@ class TrainingWorker(QObject):
                 return True # Continue training
 
             # Call gradient descent from the neural_net module
-            results = neural_net.gradient_descent(
+            results_tuple = neural_net.gradient_descent(
                 self.X_train, self.Y_train, self.X_dev, self.Y_dev,
                 self.alpha, self.epochs,
-                self.W1_init, self.b1_init, self.W2_init, self.b2_init,
+                self.parameters, # Pass the parameters dictionary
                 progress_callback=progress_callback, # Pass our simplified callback
                 patience=self.patience # Pass patience
             )
@@ -89,13 +86,13 @@ class TrainingWorker(QObject):
             if not self._is_running:
                  self.log_message.emit("Training stopped early by request.")
                  self.finished.emit(None) # Signal completion without results
-            elif results is None:
+            elif results_tuple is None:
                  self.log_message.emit("Training failed or returned None.")
                  self.finished.emit(None) # Signal completion without results
             else:
                 self.log_message.emit("Training completed successfully.")
-                # results should be (W1, b1, W2, b2, loss_history, val_acc_history)
-                self.finished.emit(results)
+                # results_tuple should be (final_parameters_dict, loss_history, val_acc_history)
+                self.finished.emit(results_tuple) # Emit the tuple containing the dict
 
         except Exception as e:
             self.log_message.emit(f"CRITICAL Error during training: {e}")

@@ -225,38 +225,46 @@ class MainWindow(QMainWindow):
     def _create_training_group(self):
         """Creates the GroupBox for training configuration widgets."""
         # QGroupBox visually groups related widgets.
-        training_group = QGroupBox("Training Controls (No dataset loaded)")
+        self.training_group = QGroupBox("Training Controls (No dataset loaded)") # Use self. here
         # Use a QVBoxLayout for arranging controls vertically within the group box.
         layout = QVBoxLayout()
 
-        # Layout for Model Template selection (Label + Dropdown)
-        model_layout = QHBoxLayout()
-        model_label = QLabel("Model Template:")
-        model_layout.addWidget(model_label)
-        self.template_combo = QComboBox()
-        # Populate the dropdown with predefined templates (and sizes)
-        self.template_combo.setToolTip("Select a model structure or choose 'Custom'")
-        # When the user changes the template, call _update_hidden_layer_input to enable/disable the custom size input
-        self.template_combo.currentIndexChanged[str].connect(self._update_hidden_layer_input)
-        model_layout.addWidget(self.template_combo)
-        model_layout.addStretch()
-        layout.addLayout(model_layout)
+        # -- Removed Model Template and Custom Hidden Layer Size --
+        # # Layout for Model Template selection (Label + Dropdown)
+        # model_layout = QHBoxLayout()
+        # model_label = QLabel("Model Template:")
+        # model_layout.addWidget(model_label)
+        # self.template_combo = QComboBox()
+        # self.template_combo.setToolTip("Select a model structure or choose 'Custom'")
+        # self.template_combo.currentIndexChanged[str].connect(self._update_hidden_layer_input)
+        # model_layout.addWidget(self.template_combo)
+        # model_layout.addStretch()
+        # layout.addLayout(model_layout)
+        # 
+        # # Layout for Custom Hidden Layer Size (Label + SpinBox)
+        # hidden_layout = QHBoxLayout()
+        # hidden_label = QLabel("Hidden Layer Neurons:")
+        # hidden_layout.addWidget(hidden_label)
+        # self.hidden_layer_input = QSpinBox()
+        # self.hidden_layer_input.setRange(1, 10000)
+        # self.hidden_layer_input.setValue(10)
+        # self.hidden_layer_input.setToolTip("Number of neurons in the hidden layer (if template is 'Custom')")
+        # self.hidden_layer_input.setEnabled(False)
+        # hidden_layout.addWidget(self.hidden_layer_input)
+        # hidden_layout.addStretch()
+        # layout.addLayout(hidden_layout)
+        # 
+        # # self._populate_model_dropdown() # Removed call
 
-        # Layout for Custom Hidden Layer Size (Label + SpinBox)
-        hidden_layout = QHBoxLayout()
-        hidden_label = QLabel("Hidden Layer Neurons:")
-        hidden_layout.addWidget(hidden_label)
-        self.hidden_layer_input = QSpinBox()
-        self.hidden_layer_input.setRange(1, 10000) # Allow 1 to 10000 neurons
-        self.hidden_layer_input.setValue(10) # Default value
-        self.hidden_layer_input.setToolTip("Number of neurons in the hidden layer (if template is 'Custom')")
-        self.hidden_layer_input.setEnabled(False) # Disabled by default, enabled if "(Custom)" is selected
-        hidden_layout.addWidget(self.hidden_layer_input)
-        hidden_layout.addStretch()
-        layout.addLayout(hidden_layout)
-
-        # Now populate the dropdown and set initial state after hidden_layer_input exists
-        self._populate_model_dropdown()
+        # --- Add QLineEdit for Hidden Layer Configuration ---
+        config_layout = QHBoxLayout()
+        config_label = QLabel("Hidden Layers (neurons, comma-separated):")
+        config_layout.addWidget(config_label)
+        self.hidden_layers_input = QLineEdit("10") # Default to one hidden layer of 10 neurons
+        self.hidden_layers_input.setToolTip("Enter neuron counts for hidden layers, e.g., '100, 50' for two hidden layers.")
+        config_layout.addWidget(self.hidden_layers_input)
+        layout.addLayout(config_layout)
+        # -----------------------------------------------------
 
         # Layout for Training Hyperparameters (Epochs, Learning Rate, Patience)
         param_layout = QFormLayout() # Form layout for label-widget pairs
@@ -302,8 +310,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
         # Apply the arrangement of widgets (layout) to the group box
-        training_group.setLayout(layout)
-        return training_group
+        self.training_group.setLayout(layout)
+        return self.training_group
 
     def _create_model_mgmt_group(self):
         """Creates the GroupBox for saving and loading model weights."""
@@ -411,58 +419,6 @@ class MainWindow(QMainWindow):
 
     # --- UI Update / Helper Methods --- #
 
-    def _populate_model_dropdown(self):
-        """Populates the model template dropdown."""
-        # Defines common model configurations the user can select.
-        # The value is the number of hidden neurons, -1 indicates custom.
-        self.model_templates = {
-            "Simple MLP (10 Hidden)": 10,
-            "Wider MLP (50 Hidden)": 50,
-            "Deep Narrow (5 Hidden)": 5,
-            "(Custom)": -1 # Special value for custom input
-        }
-        self.template_combo.addItems(self.model_templates.keys())
-        # Set initial state based on the first template
-        first_template_name = list(self.model_templates.keys())[0]
-        self._update_hidden_layer_input(first_template_name)
-
-    def _update_hidden_layer_input(self, template_name):
-        """Enables/disables the hidden layer size input based on template selection."""
-        # If the user selects "(Custom)", enable the spinbox, otherwise disable it and set its value.
-        is_custom = False # Flag to track if custom is selected
-        if template_name == "(Custom)":
-            is_custom = True
-            self.hidden_layer_input.setEnabled(True)
-        else:
-            # is_custom remains False
-            self.hidden_layer_input.setEnabled(False)
-            # Set the spinbox value to match the selected template's hidden layer size
-            if template_name in self.model_templates:
-                # Check if the value is valid (not -1 which indicates 'Custom') before setting
-                size = self.model_templates[template_name]
-                # Update the value if a non-custom template is selected
-                if not is_custom and size > 0:
-                    self.hidden_layer_input.setValue(size)
-                elif not is_custom and size <= 0: # Should not happen with current templates
-                    self._log_message(f"Warning: Template '{template_name}' has invalid size {size}. Using default.")
-                    self.hidden_layer_input.setValue(10) # Fallback
-                # When switching to custom, leave the current value as is
-
-        # Log change
-        mode = "(Custom)" if is_custom else f"Template '{template_name}' ({self.hidden_layer_input.value()} hidden neurons)"
-        self._log_message(f"Model configuration set to: {mode}")
-
-        # Re-initialize model if data is already loaded and a valid template/custom size is set
-        if hasattr(self, 'current_dataset') and self.current_dataset is not None:
-            # Check if the current hidden layer setting makes sense before re-initializing
-            current_hidden_size = self.hidden_layer_input.value()
-            if current_hidden_size > 0:
-                self._log_message("Dataset loaded. Re-initializing model for new configuration.")
-                # Call _reinitialize_model instead of _post_load_update to avoid reloading data
-                self._reinitialize_model()
-            else:
-                self._log_message("Warning: Cannot re-initialize model with current configuration (hidden size <= 0?).")
-
     def _update_image_col_type_state(self, value=None):
         """Enables/disables the image type combo box based on image col index."""
         # Called when the 'Image Col Idx' spinbox value changes.
@@ -568,9 +524,9 @@ class MainWindow(QMainWindow):
         self._log_message("Training finished successfully. Updating model parameters and plot.")
         # Unpack results - Ensure results is not None before unpacking
         # ... (rest of the code assumes results is not None)
-        self.model_params = (results[0], results[1], results[2], results[3])
-        self.train_loss_history = results[4]
-        self.val_accuracy_history = results[5]
+        self.model_params = results[0] # Parameters dictionary is the first element
+        self.train_loss_history = results[1] # Loss history is the second element
+        self.val_accuracy_history = results[2] # Accuracy history is the third element
 
         # --- Update the main plot --- #
         if hasattr(self, 'training_plot_widget') and self.training_plot_widget:
@@ -654,19 +610,27 @@ class MainWindow(QMainWindow):
                      self.probability_graph.clear_graph()
                      return # Exit the try block and method if no model
 
-                # Perform forward propagation
-                _, _, _, output, status = neural_net.forward_prop(*self.model_params, img_array)
-                # Check status from forward_prop
-                if not status:
-                    self._log_message("ERROR: Forward propagation failed (NaN/inf detected?).")
+                # Perform forward propagation using the parameters dictionary
+                # _, _, _, output, status = neural_net.forward_prop(*self.model_params, img_array) # OLD call
+                output_preds = neural_net.make_predictions(img_array, self.model_params)
+                if output_preds.size == 0: # make_predictions returns empty on error
+                    self._log_message("ERROR: Prediction failed (forward prop error?).")
                     self.probability_graph.clear_graph()
-                    return # Exit if forward prop failed
+                    return 
+                
+                # Need output probabilities, not just predictions, for the graph
+                # Rerun forward_prop to get the final activation layer (AL)
+                AL, _, status = neural_net.forward_prop(img_array, self.model_params)
+                if not status:
+                    self._log_message("ERROR: Forward propagation failed when getting probabilities.")
+                    self.probability_graph.clear_graph()
+                    return
 
-                prediction = np.argmax(output)
+                prediction = np.argmax(AL) # Get prediction from probabilities
                 self._log_message(f"Prediction Result: {prediction}")
 
-                # Update probability bar graph
-                self.probability_graph.set_probabilities(output.flatten(), prediction)
+                # Update probability bar graph with the output probabilities
+                self.probability_graph.set_probabilities(AL.flatten(), prediction)
 
             except Exception as e:
                 self._log_message(f"ERROR during prediction process: {e}")
@@ -712,14 +676,16 @@ class MainWindow(QMainWindow):
              self.progress_bar.setVisible(False)
              return
 
-        W1_init, b1_init, W2_init, b2_init = self.model_params
+        # --- UNPACKING REMOVED - model_params is now a dictionary --- 
+        # W1_init, b1_init, W2_init, b2_init = self.model_params 
 
         self.training_worker = TrainingWorker(
             self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-            W1_init, b1_init, W2_init, b2_init, # Pass initial weights/biases
+            # W1_init, b1_init, W2_init, b2_init, # Pass initial weights/biases
+            self.model_params, # Pass the entire parameters dictionary
             epochs,         # Pass epochs
             learning_rate,  # Pass learning rate as alpha
-            self.current_num_classes, # Pass number of classes
+            # self.current_num_classes, # No longer needed for worker init
             patience        # Pass patience value
         )
         # Move worker to the thread
@@ -994,17 +960,38 @@ class MainWindow(QMainWindow):
 
         # --- Re-initialize model parameters for the new dataset size ---
         if self.current_num_classes > 0:
-           # Get hidden layer size from the UI input
-           hidden_size = self.hidden_layer_input.value()
-           self._log_message(f"Re-initializing model: Hidden Size={hidden_size}, Output Classes={self.current_num_classes}")
-           self.model_params = neural_net.init_params(
-               num_classes=self.current_num_classes,
-               hidden_layer_size=hidden_size
-           )
-           self._log_message("Model re-initialized.")
+            # --- Get layer dimensions from UI --- #
+            try:
+                hidden_layers_str = self.hidden_layers_input.text().strip()
+                if hidden_layers_str:
+                    hidden_dims = [int(s.strip()) for s in hidden_layers_str.split(',') if s.strip()]
+                    if not all(dim > 0 for dim in hidden_dims):
+                        raise ValueError("Hidden layer dimensions must be positive integers.")
+                else:
+                    hidden_dims = [] # No hidden layers if input is empty
+                
+                # Construct full layer dimensions: [input_size] + hidden_dims + [output_size]
+                input_size = 784 # Assuming 28x28 input images
+                layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
+                self._log_message(f"Re-initializing model with layers: {layer_dims}")
+                
+                # Initialize parameters using the new structure
+                self.model_params = neural_net.init_params(layer_dims)
+                self._log_message("Model re-initialized.")
+                self.save_button.setEnabled(False) # Disable save until trained
+                self.train_button.setEnabled(True) # Enable training
+
+            except ValueError as e:
+                self._log_message(f"ERROR: Invalid hidden layer configuration '{self.hidden_layers_input.text()}'. Please enter comma-separated positive integers. {e}")
+                self.model_params = None
+                self.train_button.setEnabled(False)
+                self.save_button.setEnabled(False)
+            # -------------------------------------- #
         else:
-             self._log_message("ERROR: Number of classes is 0 or unknown. Cannot initialize model parameters.")
-             self.model_params = None
+            self._log_message("ERROR: Number of classes is 0 or unknown. Cannot initialize model parameters.")
+            self.model_params = None
+            self.train_button.setEnabled(False)
+            self.save_button.setEnabled(False)
         # -------------------------------------------------------------
 
         # Update combo box if needed (e.g., for uploaded)
@@ -1070,7 +1057,7 @@ class MainWindow(QMainWindow):
             return
 
         # Open save file dialog
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Model Weights", "", "NumPy NPZ Files (*.npz)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Model Parameters", "", "NumPy NPZ Files (*.npz)")
 
         if file_path:
             # Ensure the filename ends with .npz
@@ -1078,37 +1065,37 @@ class MainWindow(QMainWindow):
                 file_path += '.npz'
 
             try:
-                W1, b1, W2, b2 = self.model_params
-                np.savez(file_path, W1=W1, b1=b1, W2=W2, b2=b2)
-                self._log_message(f"Weights saved successfully to: {file_path}")
+                # Save the entire parameters dictionary
+                np.savez(file_path, **self.model_params)
+                self._log_message(f"Parameters saved successfully to: {file_path}")
             except Exception as e:
-                self._log_message(f"ERROR saving weights to {file_path}: {e}")
+                self._log_message(f"ERROR saving parameters to {file_path}: {e}")
 
     def load_weights(self):
         # Open load file dialog
-        file_path, _ = QFileDialog.getOpenFileName(self, "Load Model Weights", "", "NumPy NPZ Files (*.npz)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load Model Parameters", "", "NumPy NPZ Files (*.npz)")
 
         if file_path:
             try:
-                self._log_message(f"Attempting to load weights from: {file_path}")
-                data = np.load(file_path)
-                # Check if required keys are present
-                if all(k in data for k in ['W1', 'b1', 'W2', 'b2']):
-                    W1 = data['W1']
-                    b1 = data['b1']
-                    W2 = data['W2']
-                    b2 = data['b2']
-                    self.model_params = (W1, b1, W2, b2)
-                    self._log_message("Weights loaded successfully.")
-                    # Reset training history as it doesn't correspond to loaded weights
-                    self.train_loss_history = []
-                    self.val_accuracy_history = []
-                else:
-                    self._log_message(f"ERROR: Loaded file {file_path} is missing required weight keys (W1, b1, W2, b2).")
+                self._log_message(f"Attempting to load parameters from: {file_path}")
+                data = np.load(file_path, allow_pickle=True) # Allow pickle for potential flexibility, though not strictly needed for standard arrays
+                # Load the dictionary directly
+                self.model_params = dict(data) 
+                self._log_message("Parameters loaded successfully.")
+                # Reset training history as it doesn't correspond to loaded parameters
+                self.train_loss_history = []
+                self.val_accuracy_history = []
+                # Update UI based on loaded parameters (e.g., infer layer structure?)
+                # This is tricky - we don't necessarily know the layer string that created these weights
+                # For now, just enable the train button if data is also loaded
+                self._log_message("Loaded parameters might not match the current layer configuration input.")
+                if self.current_dataset is not None:
+                    self.train_button.setEnabled(True)
+                self.save_button.setEnabled(True) # Enable save button after loading
             except Exception as e:
-                self._log_message(f"ERROR loading weights from {file_path}: {e}")
+                self._log_message(f"ERROR loading parameters from {file_path}: {e}")
         else:
-            self._log_message("Load weights cancelled.")
+            self._log_message("Load parameters cancelled.")
 
     # --- New Slot for Predicting Drawing ---
     def _predict_drawing(self):
@@ -1145,18 +1132,20 @@ class MainWindow(QMainWindow):
                  self.probability_graph.clear_graph()
                  return
 
-            _, _, _, output, status = neural_net.forward_prop(*self.model_params, img_array)
-
+            # Perform prediction using the parameters dictionary
+            # _, _, _, output, status = neural_net.forward_prop(*self.model_params, img_array) # OLD call
+            # Rerun forward_prop to get the final activation layer (AL) for probabilities
+            AL, _, status = neural_net.forward_prop(img_array, self.model_params)
             if not status:
-                self._log_message("ERROR: Forward propagation failed (NaN/inf detected?).")
+                self._log_message("ERROR: Forward propagation failed for drawing prediction.")
                 self.probability_graph.clear_graph()
                 return
 
-            prediction = np.argmax(output)
+            prediction = np.argmax(AL)
             self._log_message(f"Prediction Result: {prediction}")
 
             # Update probability bar graph
-            self.probability_graph.set_probabilities(output.flatten(), prediction)
+            self.probability_graph.set_probabilities(AL.flatten(), prediction)
 
         except Exception as e:
             self._log_message(f"ERROR during prediction: {e}")
