@@ -107,24 +107,25 @@ def activation_forward(A_prev: np.ndarray, W: np.ndarray, b: np.ndarray, activat
     cache = (linear_cache, activation_cache) # linear_cache = (A_prev, W, b), activation_cache = Z or A
     return A, cache
 
-def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray], hidden_activation: str = "relu") -> Tuple[np.ndarray, List[Tuple[Any, Any]], bool]:
-    """Implements forward propagation for the [LINEAR->ACTIVATION]*(L-1)->LINEAR->SOFTMAX model.
+def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray], hidden_activation: str = "relu", keep_prob: float = 1.0) -> Tuple[np.ndarray, List[Tuple[Any, Any, Optional[np.ndarray]]], bool]:
+    """Implements forward propagation with optional Dropout.
 
     Args:
         X (np.ndarray): Input data (shape: input_size, num_examples).
         parameters (Dict[str, np.ndarray]): Output of init_params().
         hidden_activation (str): Activation function for hidden layers ('relu', 'sigmoid', 'tanh').
+        keep_prob (float): Probability of keeping a neuron active during dropout (1.0 = disabled).
 
     Returns:
         Tuple containing:
             AL (np.ndarray): Last post-activation value (output layer).
-            caches (List): List of caches containing (linear_cache, activation_cache) for each layer.
+            caches (List): List of caches containing (linear_cache, activation_cache, dropout_mask) for each layer.
             status (bool): True if successful, False if NaN/inf detected.
     """
-    caches: List[Tuple[Any, Any]] = []
+    caches: List[Tuple[Any, Any, Optional[np.ndarray]]] = [] # Cache now includes dropout mask
     A = X
     L = len(parameters) // 2 # Number of layers with parameters
-    print(f"  DEBUG [forward_prop]: Number of layers (L) = {L}, Hidden Activation = {hidden_activation}", file=sys.stderr)
+    print(f"  DEBUG [forward_prop]: Number of layers (L) = {L}, Hidden Activation = {hidden_activation}, KeepProb={keep_prob}", file=sys.stderr)
 
     try:
         # Implement [LINEAR -> hidden_activation] L-1 times
@@ -133,18 +134,34 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray], hidden_activa
             Wl = parameters[f'W{l}']
             bl = parameters[f'b{l}']
             # Use the specified hidden_activation for hidden layers
-            A, cache = activation_forward(A_prev, Wl, bl, activation=hidden_activation)
-            caches.append(cache)
+            A, cache_l = activation_forward(A_prev, Wl, bl, activation=hidden_activation)
+            linear_cache, activation_cache = cache_l # Unpack the cache from activation_forward
+
+            # --- Apply Dropout --- #
+            dropout_mask = None
+            if keep_prob < 1.0:
+                print(f"  DEBUG [forward_prop]: Applying dropout with keep_prob={keep_prob} to layer {l}", file=sys.stderr)
+                dropout_mask = (np.random.rand(A.shape[0], A.shape[1]) < keep_prob).astype(int)
+                A = A * dropout_mask  # Apply mask
+                A = A / keep_prob     # Scale using inverted dropout
+            # --------------------- #
+
+            # Store the complete cache including the mask (or None)
+            caches.append((linear_cache, activation_cache, dropout_mask))
+
             if np.isnan(A).any() or np.isinf(A).any():
                 print(f"ERROR: NaN or Inf detected in activations at layer {l} ({hidden_activation}).", file=sys.stderr)
                 return A, caches, False # Indicate failure
 
-        # Implement LINEAR -> SOFTMAX for the last layer
+        # Implement LINEAR -> SOFTMAX for the last layer (NO DROPOUT HERE)
         WL = parameters[f'W{L}']
         bL = parameters[f'b{L}']
         # Output layer always uses softmax
-        AL, cache = activation_forward(A, WL, bL, activation="softmax")
-        caches.append(cache)
+        AL, cache_L = activation_forward(A, WL, bL, activation="softmax")
+        linear_cache_L, activation_cache_L = cache_L
+        # Append cache for the last layer with None for the dropout mask
+        caches.append((linear_cache_L, activation_cache_L, None))
+
         if np.isnan(AL).any() or np.isinf(AL).any():
             print("ERROR: NaN or Inf detected in output layer activations (softmax).", file=sys.stderr)
             return AL, caches, False # Indicate failure
@@ -154,10 +171,15 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray], hidden_activa
 
     except Exception as e:
         print(f"ERROR during forward propagation: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         # Determine expected output shape
         L = len(parameters) // 2
         output_size = parameters[f'W{L}'].shape[0]
         dummy_AL = np.zeros((output_size, X.shape[1]))
+        # Return dummy caches structure if error occurs before loop finishes
+        if not caches:
+            caches = [(None, None, None)] * L
         return dummy_AL, caches, False
 
 # --- Backward Propagation ---
@@ -222,17 +244,20 @@ def activation_backward(dA: np.ndarray, cache: Tuple[Any, Any], activation: str)
     dA_prev, dW, db = linear_backward(dZ, linear_cache)
     return dA_prev, dW, db
 
-def backward_prop(AL: np.ndarray, Y: np.ndarray, caches: List[Tuple[Any, Any]], hidden_activation: str = "relu") -> Dict[str, np.ndarray]:
-    """Implement the backward propagation for the [LINEAR->ACTIVATION] * (L-1) -> LINEAR -> SOFTMAX model.
+def backward_prop(AL: np.ndarray, Y: np.ndarray, caches: List[Tuple[Any, Any, Optional[np.ndarray]]], parameters: Dict[str, np.ndarray], hidden_activation: str = "relu", l2_lambda: float = 0.0, keep_prob: float = 1.0) -> Dict[str, np.ndarray]:
+    """Implement backprop with optional L2 regularization and Dropout.
 
     Args:
         AL (np.ndarray): Probability vector, output of the forward propagation.
         Y (np.ndarray): True "label" vector (shape: 1, num_examples or num_examples,).
-        caches (List): List of caches from forward_prop.
-        hidden_activation (str): Activation function used in hidden layers ('relu', 'sigmoid', 'tanh').
+        caches (List): List of caches from forward_prop (linear_cache, activation_cache, dropout_mask).
+        parameters (Dict[str, np.ndarray]): Model parameters (needed for L2 grad).
+        hidden_activation (str): Activation function for hidden layers.
+        l2_lambda (float): L2 regularization hyperparameter.
+        keep_prob (float): Probability used for dropout during forward pass (needed for scaling dA).
 
     Returns:
-        Dict[str, np.ndarray]: A dictionary with the gradients.
+        Dict[str, np.ndarray]: Gradients (dW, db for each layer).
     """
     grads: Dict[str, np.ndarray] = {}
     L = len(caches) # The number of layers
@@ -241,32 +266,48 @@ def backward_prop(AL: np.ndarray, Y: np.ndarray, caches: List[Tuple[Any, Any]], 
     Y = Y.reshape(1, m)
 
     # --- Initializing the backpropagation ---
-    # Calculate dZL for the output layer (Softmax + Cross-Entropy)
     num_classes = AL.shape[0]
-    Y_one_hot = one_hot(Y.flatten(), num_classes) # one_hot expects 1D Y
+    Y_one_hot = one_hot(Y.flatten(), num_classes)
     dZL = AL - Y_one_hot # Derivative of CrossEntropyLoss w.r.t Z for Softmax output
 
     # Gradients for the last layer (Layer L)
-    current_cache = caches[L-1] # Cache for the last layer (Linear + Softmax)
-    # The activation_backward for softmax expects dZL directly
-    grads[f"dA{L-1}"], grads[f"dW{L}"], grads[f"db{L}"] = activation_backward(dZL, current_cache, activation="softmax")
+    current_cache = caches[L-1]
+    linear_cache_L, activation_cache_L, _ = current_cache # Last layer has no dropout mask
+    # Pass dZL directly to activation_backward for softmax
+    grads[f"dA{L-1}"], dW_L, db_L = activation_backward(dZL, (linear_cache_L, activation_cache_L), activation="softmax")
+
+    # Add L2 regularization gradient to dWL if needed
+    if l2_lambda > 0:
+        grads[f"dW{L}"] = dW_L + (l2_lambda / m) * parameters[f'W{L}']
+    else:
+        grads[f"dW{L}"] = dW_L
+    grads[f"db{L}"] = db_L # No regularization for bias terms
 
     # --- Loop from l=L-2 down to 0 ---
-    # Iterate through the hidden layers backwards
     for l in reversed(range(L - 1)):
-        # Gradients for layer l: LINEAR -> hidden_activation
-        current_cache = caches[l] # Cache for layer l
-        dA_input = grads[f"dA{l + 1}"] # Get dA from the *next* layer (closer to output)
+        current_cache = caches[l]
+        linear_cache, activation_cache, dropout_mask = current_cache # Unpack cache including mask
 
-        # Use the specified hidden_activation for backward step
-        dA_prev_temp, dW_temp, db_temp = activation_backward(dA_input, current_cache, activation=hidden_activation)
+        dA_input = grads[f"dA{l + 1}"]
 
-        # Store gradients for the current layer l (parameters W{l+1}, b{l+1})
+        # --- Apply Dropout Mask to dA_input --- #
+        if dropout_mask is not None:
+             print(f"  DEBUG [backward_prop]: Applying dropout mask to dA{l+1}", file=sys.stderr)
+             dA_input = dA_input * dropout_mask  # Apply mask
+             dA_input = dA_input / keep_prob     # Scale using inverted dropout
+        # ------------------------------------- #
+
+        dA_prev_temp, dW_temp, db_temp = activation_backward(dA_input, (linear_cache, activation_cache), activation=hidden_activation)
+
         grads[f"dA{l}"] = dA_prev_temp
-        grads[f"dW{l + 1}"] = dW_temp
-        grads[f"db{l + 1}"] = db_temp
+        # Add L2 regularization gradient to dW if needed
+        if l2_lambda > 0:
+            grads[f"dW{l + 1}"] = dW_temp + (l2_lambda / m) * parameters[f'W{l+1}']
+        else:
+            grads[f"dW{l + 1}"] = dW_temp
+        grads[f"db{l + 1}"] = db_temp # No regularization for bias terms
 
-    # Clean up intermediate dA gradients (only need dW and db for updates)
+    # Clean up intermediate dA gradients
     grads_final = {key: val for key, val in grads.items() if not key.startswith('dA')}
     return grads_final
 
@@ -300,15 +341,18 @@ def get_accuracy(predictions: np.ndarray, Y: np.ndarray) -> float:
 
 # --- Loss Function ---
 
-def compute_loss(AL: np.ndarray, Y: np.ndarray) -> float:
-    """Computes the cross-entropy loss.
+def compute_loss(AL: np.ndarray, Y: np.ndarray, parameters: Dict[str, np.ndarray], l2_lambda: float = 0.0) -> float:
+    """Computes the cross-entropy loss, optionally with L2 regularization.
 
     Args:
         AL (np.ndarray): Probabilities from softmax output layer (num_classes, num_examples).
         Y (np.ndarray): True labels, vector of shape (1, num_examples) or (num_examples,).
+        parameters (Dict[str, np.ndarray]): Dictionary of parameters (W1, b1, ..., WL, bL).
+                                          Needed for L2 regularization.
+        l2_lambda (float): L2 regularization hyperparameter.
 
     Returns:
-        float: Cross-entropy cost.
+        float: Cross-entropy cost + L2 regularization cost.
     """
     m = Y.shape[1] if Y.ndim > 1 else Y.shape[0]
     num_classes = AL.shape[0]
@@ -326,16 +370,25 @@ def compute_loss(AL: np.ndarray, Y: np.ndarray) -> float:
         raise ValueError(f"Y shape {Y.shape} is not compatible with AL shape {AL.shape} for loss calculation.")
 
     # Cross-entropy loss: - (1/m) * sum(Y_one_hot * log(AL))
-    # Clip AL to prevent log(0) - already done in softmax, but double-check
     epsilon = 1e-10
     AL_clipped = np.clip(AL, epsilon, 1. - epsilon)
-    cost = - (1./m) * np.sum(Y_one_hot * np.log(AL_clipped))
+    cross_entropy_cost = - (1./m) * np.sum(Y_one_hot * np.log(AL_clipped))
+
+    # L2 Regularization Cost
+    l2_regularization_cost = 0.0
+    if l2_lambda > 0:
+        L = len(parameters) // 2
+        l2_norm_sum = 0
+        for l in range(1, L + 1):
+            l2_norm_sum += np.sum(np.square(parameters[f'W{l}']))
+        l2_regularization_cost = (l2_lambda / (2 * m)) * l2_norm_sum
+
+    cost = cross_entropy_cost + l2_regularization_cost
 
     # Ensure cost is a scalar float
     cost = np.squeeze(cost)
     if np.isnan(cost) or np.isinf(cost):
-        print(f"ERROR [compute_loss]: Loss is NaN or Inf. AL min/max: {np.min(AL)}, {np.max(AL)}", file=sys.stderr)
-        # Optionally return a large number or raise an error
+        print(f"ERROR [compute_loss]: Loss is NaN or Inf. CrossEntropy={cross_entropy_cost}, L2={l2_regularization_cost}", file=sys.stderr)
         return np.inf
     return float(cost)
 
@@ -346,10 +399,13 @@ stop_training_flag = False # Global flag to signal stopping
 def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray, Y_dev: np.ndarray,
                      alpha: float, iterations: int,
                      parameters: Dict[str, np.ndarray],
-                     hidden_activation: str = "relu", # Add activation function parameter
-                     progress_callback: Optional[Callable[[int, int, float, float], bool]] = None, # iter, total, loss, val_acc -> continue?
+                     hidden_activation: str = "relu",
+                     optimizer_name: str = "GradientDescent",
+                     l2_lambda: float = 0.0,
+                     dropout_keep_prob: float = 1.0, # Add dropout keep_prob parameter
+                     progress_callback: Optional[Callable[[int, int, float, float], bool]] = None,
                      patience: int = 0) -> Optional[Tuple[Dict[str, np.ndarray], List[float], List[float]]]:
-    """Optimizes parameters using gradient descent.
+    """Optimizes parameters using gradient descent or Adam, optionally with L2/Dropout regularization.
 
     Args:
         X_train, Y_train: Training data and labels.
@@ -358,6 +414,9 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
         iterations (int): Number of iterations (epochs).
         parameters (Dict[str, np.ndarray]): Initialized parameters.
         hidden_activation (str): Activation for hidden layers ('relu', 'sigmoid', 'tanh').
+        optimizer_name (str): Optimization algorithm ('GradientDescent' or 'Adam').
+        l2_lambda (float): L2 regularization hyperparameter (default 0.0).
+        dropout_keep_prob (float): Probability of keeping a neuron active during dropout (1.0 = disabled).
         progress_callback (Optional[Callable]): Function called each iteration
                                                 with (iter_num(1-based), total_iters, train_loss, val_acc).
                                                 Should return False to stop training.
@@ -373,17 +432,36 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
             Returns None if training was stopped prematurely or an error occurred.
     """
     global stop_training_flag
-    print(f"--- Starting Gradient Descent (Hidden Activation: {hidden_activation}) ---", file=sys.stderr)
+    print(f"--- Starting Training (Optimizer: {optimizer_name}, Activation: {hidden_activation}, L2 λ: {l2_lambda}, Dropout Keep: {dropout_keep_prob}) ---", file=sys.stderr)
     loss_history = []
     val_accuracy_history = []
     best_val_acc = -1.0
     epochs_no_improve = 0
-    best_params = parameters # Store initial params as best initially
+    best_params = parameters.copy() # Store initial params as best initially
+
+    # --- Adam Optimizer Initialization (if selected) ---
+    v: Dict[str, np.ndarray] = {} # Momentum terms (first moment)
+    s: Dict[str, np.ndarray] = {} # RMSprop terms (second moment)
+    t: int = 0                    # Timestep for bias correction
+    beta1: float = 0.9            # Adam hyperparameter (momentum decay)
+    beta2: float = 0.999          # Adam hyperparameter (RMSprop decay)
+    epsilon: float = 1e-8         # Adam hyperparameter (for numerical stability)
+
+    L = len(parameters) // 2 # Number of layers (W1, b1, ..., WL, bL)
+    if optimizer_name.lower() == 'adam':
+        print("  Initializing Adam parameters (v, s)", file=sys.stderr)
+        for l in range(1, L + 1):
+            v[f"dW{l}"] = np.zeros_like(parameters[f"W{l}"])
+            v[f"db{l}"] = np.zeros_like(parameters[f"b{l}"])
+            s[f"dW{l}"] = np.zeros_like(parameters[f"W{l}"])
+            s[f"db{l}"] = np.zeros_like(parameters[f"b{l}"])
+    # -----------------------------------------------------
 
     # --- Get Number of Classes --- #
-    L = len(parameters) // 2
     num_classes = parameters[f'W{L}'].shape[0]
     print(f"  DEBUG [gradient_descent]: Inferred num_classes = {num_classes}", file=sys.stderr)
+    if l2_lambda > 0.0:
+        print(f"  INFO [gradient_descent]: L2 Regularization enabled (λ={l2_lambda})", file=sys.stderr)
     # ----------------------------- #
 
     # Ensure Y_dev is 1D for accuracy calculation
@@ -396,20 +474,20 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
             return None # Indicate premature stop
 
         # Forward propagation on training data
-        AL_train, caches, forward_status_train = forward_prop(X_train, parameters, hidden_activation=hidden_activation)
+        AL_train, caches, forward_status_train = forward_prop(X_train, parameters, hidden_activation=hidden_activation, keep_prob=dropout_keep_prob)
         if not forward_status_train:
             print(f"ERROR: Forward propagation failed on training set at iteration {i}. Stopping training.", file=sys.stderr)
             return None
 
-        # Compute training loss
-        train_loss = compute_loss(AL_train, Y_train)
+        # Compute training loss (passing parameters and lambda)
+        train_loss = compute_loss(AL_train, Y_train, parameters, l2_lambda=l2_lambda)
         loss_history.append(train_loss)
         if np.isnan(train_loss) or np.isinf(train_loss):
              print(f"ERROR: Training loss is NaN/Inf at iteration {i}. Stopping training.", file=sys.stderr)
              return None
 
-        # Backward propagation
-        grads = backward_prop(AL_train, Y_train, caches, hidden_activation=hidden_activation)
+        # Backward propagation (passing parameters and lambda)
+        grads = backward_prop(AL_train, Y_train, caches, parameters, hidden_activation=hidden_activation, l2_lambda=l2_lambda, keep_prob=dropout_keep_prob)
 
         # Check gradients for NaN/Inf
         for key, grad in grads.items():
@@ -417,8 +495,33 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
                   print(f"ERROR: Stopping training at iteration {i} due to NaN/inf in gradient '{key}'.", file=sys.stderr)
                   return None
 
-        # Update parameters
-        parameters = update_params(parameters, grads, alpha)
+        # --- Parameter Update ---
+        if optimizer_name.lower() == 'adam':
+            t += 1 # Increment timestep
+            for l in range(1, L + 1):
+                # Update biased first moment estimate
+                v[f"dW{l}"] = beta1 * v[f"dW{l}"] + (1 - beta1) * grads[f"dW{l}"]
+                v[f"db{l}"] = beta1 * v[f"db{l}"] + (1 - beta1) * grads[f"db{l}"]
+
+                # Compute bias-corrected first moment estimate
+                v_corrected_dW = v[f"dW{l}"] / (1 - beta1**t)
+                v_corrected_db = v[f"db{l}"] / (1 - beta1**t)
+
+                # Update biased second raw moment estimate
+                s[f"dW{l}"] = beta2 * s[f"dW{l}"] + (1 - beta2) * np.square(grads[f"dW{l}"])
+                s[f"db{l}"] = beta2 * s[f"db{l}"] + (1 - beta2) * np.square(grads[f"db{l}"])
+
+                # Compute bias-corrected second raw moment estimate
+                s_corrected_dW = s[f"dW{l}"] / (1 - beta2**t)
+                s_corrected_db = s[f"db{l}"] / (1 - beta2**t)
+
+                # Update parameters
+                parameters[f"W{l}"] = parameters[f"W{l}"] - alpha * v_corrected_dW / (np.sqrt(s_corrected_dW) + epsilon)
+                parameters[f"b{l}"] = parameters[f"b{l}"] - alpha * v_corrected_db / (np.sqrt(s_corrected_db) + epsilon)
+
+        else: # Default to standard Gradient Descent
+            parameters = update_params(parameters, grads, alpha)
+        # ------------------------
 
         # Check parameters for NaN/Inf
         for key, param in parameters.items():
@@ -428,7 +531,7 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
 
         # --- Calculate Validation Accuracy ---
         # Predict on development set using current parameters
-        AL_dev, _, forward_status_dev = forward_prop(X_dev, parameters, hidden_activation=hidden_activation)
+        AL_dev, _, forward_status_dev = forward_prop(X_dev, parameters, hidden_activation=hidden_activation, keep_prob=1.0)
         if not forward_status_dev:
             print(f"WARN: Forward propagation failed on dev set at iteration {i}. Skipping validation.", file=sys.stderr)
             val_acc = 0.0 # Assign a default or handle as appropriate
@@ -436,7 +539,8 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
             predictions_dev = get_predictions(AL_dev)
             val_acc = get_accuracy(predictions_dev, Y_dev_flat) # Use flattened Y_dev
         val_accuracy_history.append(val_acc)
-        # -----------------------------------\n
+        # -----------------------------------
+
         # --- Log Progress & Call Callback ---
         print(f"Iter: {i+1}/{iterations} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f}", file=sys.stderr)
         if progress_callback:
@@ -464,9 +568,10 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
                 return best_params, loss_history, val_accuracy_history
         # ---------------------------
 
-    print("--- Gradient Descent Finished ---", file=sys.stderr)
+
+    print("--- Training Finished ---", file=sys.stderr)
     # If early stopping was enabled, return best_params, otherwise return final params
-    final_params = best_params if patience > 0 else parameters
+    final_params = best_params if patience > 0 and len(best_params) > 0 else parameters
     return final_params, loss_history, val_accuracy_history
 
 # --- Prediction Function ---
