@@ -34,7 +34,7 @@ class TrainingWorker(QObject):
 
     # Removed error_occurred signal, will emit finished(None) on error instead for simplicity
 
-    def __init__(self, X_train, Y_train, X_dev, Y_dev, initial_parameters: Dict[str, np.ndarray], epochs: int, alpha: float, patience: int, activation_function: str):
+    def __init__(self, X_train, Y_train, X_dev, Y_dev, initial_parameters: Dict[str, np.ndarray], epochs: int, alpha: float, patience: int, activation_function: str, optimizer_name: str, l2_lambda: float, dropout_keep_prob: float):
         super().__init__()
         self.X_train = X_train
         self.Y_train = Y_train
@@ -45,6 +45,9 @@ class TrainingWorker(QObject):
         self.alpha = alpha
         self.patience = patience
         self.activation_function = activation_function # Store the selected activation
+        self.optimizer_name = optimizer_name # Store the selected optimizer
+        self.l2_lambda = l2_lambda # Store L2 lambda
+        self.dropout_keep_prob = dropout_keep_prob # Store dropout keep prob
         self._is_running = True # Flag to control the loop
 
     def stop(self):
@@ -81,9 +84,12 @@ class TrainingWorker(QObject):
                 self.X_train, self.Y_train, self.X_dev, self.Y_dev,
                 self.alpha, self.epochs,
                 self.parameters, # Pass the parameters dictionary
-                hidden_activation=self.activation_function, # Pass activation function with correct keyword
-                progress_callback=progress_callback, # Pass our updated callback
-                patience=self.patience # Pass patience
+                hidden_activation=self.activation_function,
+                optimizer_name=self.optimizer_name,
+                l2_lambda=self.l2_lambda,
+                dropout_keep_prob=self.dropout_keep_prob, # Pass dropout keep prob
+                progress_callback=progress_callback,
+                patience=self.patience
             )
 
             if not self._is_running:

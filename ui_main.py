@@ -154,7 +154,8 @@ class MainWindow(QMainWindow):
         self.current_labels: Optional[np.ndarray] = None
         self.current_dataset_name: Optional[str] = None
         self.num_classes: int = 0 # Number of classes in the loaded dataset
-        self.model_params: Optional[dict] = None # Stores trained weights and biases (W1, b1, W2, b2)
+        self.model_params: Optional[dict] = None # Stores trained weights and biases
+        self.model_layer_dims: Optional[List[int]] = None # Stores layer dimensions of current self.model_params
         self.training_worker: Optional[TrainingWorker] = None
         self.training_thread: Optional[QThread] = None
         self.train_loss_history: List[float] = []
@@ -279,6 +280,40 @@ class MainWindow(QMainWindow):
         hyper_layout.addWidget(self.activation_combo)
         # ----------------------------------------- #
 
+        # --- Add Optimizer Selection --- #
+        optimizer_label = QLabel("Optimizer:")
+        hyper_layout.addWidget(optimizer_label)
+        self.optimizer_combo = QComboBox()
+        self.optimizer_combo.addItems(["Adam", "GradientDescent"]) # Add options
+        self.optimizer_combo.setToolTip("Optimization algorithm (Adam is generally recommended for faster convergence)")
+        # Set Adam as default if desired: self.optimizer_combo.setCurrentText("Adam")
+        hyper_layout.addWidget(self.optimizer_combo)
+        # ------------------------------- #
+
+        # --- Add L2 Regularization Lambda --- #
+        l2_lambda_label = QLabel("L2 λ:")
+        hyper_layout.addWidget(l2_lambda_label)
+        self.l2_lambda_input = QDoubleSpinBox()
+        self.l2_lambda_input.setRange(0.0, 10.0) # Allow lambda from 0 (off) up to 10
+        self.l2_lambda_input.setDecimals(5)      # More precision for lambda
+        self.l2_lambda_input.setSingleStep(0.001)
+        self.l2_lambda_input.setValue(0.0)       # Default is off
+        self.l2_lambda_input.setToolTip("L2 regularization strength (lambda). 0.0 means disabled. Typical values are small (e.g., 0.01, 0.1, 1.0).")
+        hyper_layout.addWidget(self.l2_lambda_input)
+        # ---------------------------------- #
+
+        # --- Add Dropout Keep Probability --- #
+        dropout_label = QLabel("Dropout Keep Prob:")
+        hyper_layout.addWidget(dropout_label)
+        self.dropout_keep_prob_input = QDoubleSpinBox()
+        self.dropout_keep_prob_input.setRange(0.1, 1.0) # Keep prob from 10% to 100%
+        self.dropout_keep_prob_input.setDecimals(2)
+        self.dropout_keep_prob_input.setSingleStep(0.1)
+        self.dropout_keep_prob_input.setValue(1.0)       # Default is 1.0 (off)
+        self.dropout_keep_prob_input.setToolTip("Probability of keeping a neuron active during training (Dropout). 1.0 means dropout is disabled.")
+        hyper_layout.addWidget(self.dropout_keep_prob_input)
+        # ------------------------------------ #
+
         hyper_layout.addStretch() # Pushes hyperparameter widgets to the left
         layout.addLayout(hyper_layout) # Add the hyperparameter layout to the main vertical layout
 
@@ -368,7 +403,7 @@ class MainWindow(QMainWindow):
         file_test_layout.addWidget(file_label)
         # Button to trigger the file dialog and prediction process
         self.predict_file_button = QPushButton("Select & Predict File")
-        self.predict_file_button.setToolTip("Load an image file (e.g., PNG, JPG) for prediction")
+        self.predict_file_button.setToolTip("Load an image file (e.g., PNG, JPG, JPEG) for prediction")
         # Connect click to the method handling file prediction
         self.predict_file_button.clicked.connect(self._predict_image_file)
         file_test_layout.addWidget(self.predict_file_button)
@@ -712,15 +747,17 @@ class MainWindow(QMainWindow):
         learning_rate = self.learning_rate_input.value()
         patience = self.patience_input.value()
         activation_function = self.activation_combo.currentText()
-        self._log_message(f"Hyperparameters: Epochs={epochs}, Learning Rate={learning_rate}, Patience={patience}, Activation={activation_function}")
+        optimizer_name = self.optimizer_combo.currentText()
+        l2_lambda = self.l2_lambda_input.value()
+        dropout_keep_prob = self.dropout_keep_prob_input.value()
+        self._log_message(f"Hyperparameters: Epochs={epochs}, LearnRate={learning_rate}, Patience={patience}, Activation={activation_function}, Optimizer={optimizer_name}, L2 λ={l2_lambda}, DropoutKeep={dropout_keep_prob}")
         self.progress_bar.setMaximum(epochs)
 
-        # --- Re-initialize Model Parameters Based on Current UI Input --- #
+        # --- Determine Target Architecture and Check if Re-initialization is Needed --- #
+        reinitialize_params = False
+        target_layer_dims = None
         try:
             hidden_layers_str = self.hidden_layers_input.text().strip()
-            # --- Debug: Log the raw input string --- #
-            self._log_message(f"DEBUG [start_training]: Read hidden_layers_input text: '{hidden_layers_str}'")
-            # ---------------------------------------- #
             if hidden_layers_str:
                 hidden_dims = [int(s.strip()) for s in hidden_layers_str.split(',') if s.strip()]
                 if not all(dim > 0 for dim in hidden_dims):
@@ -728,61 +765,69 @@ class MainWindow(QMainWindow):
             else:
                 hidden_dims = [] # No hidden layers
 
-            input_size = 784 # Assuming 28x28 input
+            if self.X_train is None:
+                 raise ValueError("Cannot determine input size, training data not loaded.")
+            input_size = self.X_train.shape[0] # Get input size from training data
+
             if self.current_num_classes <= 0:
-                self._log_message("ERROR: Number of classes not determined. Cannot initialize model for training.")
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-                self.progress_bar.setVisible(False)
-                return
-            
-            layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
-            self._log_message(f"Initializing model for training with layers: {layer_dims}")
-            self.model_params = neural_net.init_params(layer_dims)
-            self.save_button.setEnabled(False) # Disable save until trained again
+                raise ValueError("Number of classes not determined.")
+
+            target_layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
+
+            # Check if re-initialization is needed
+            if self.model_params is None:
+                self._log_message("No existing model parameters found. Initializing new model.")
+                reinitialize_params = True
+            elif self.model_layer_dims != target_layer_dims:
+                self._log_message(f"Target architecture {target_layer_dims} differs from current parameters architecture {self.model_layer_dims}. Re-initializing model.")
+                reinitialize_params = True
+            else:
+                self._log_message(f"Using existing model parameters with architecture: {self.model_layer_dims}")
 
         except ValueError as e:
-            self._log_message(f"ERROR: Invalid hidden layer configuration '{self.hidden_layers_input.text()}'. Please enter comma-separated positive integers. {e}")
+            self._log_message(f"ERROR determining target architecture or checking for re-initialization: {e}")
             self.start_button.setEnabled(True) # Re-enable train button on error
             self.stop_button.setEnabled(False)
             self.progress_bar.setVisible(False)
-            return
-        except Exception as e:
-            self._log_message(f"ERROR: Unexpected error initializing model parameters: {e}")
+            return # Stop if config is invalid
+        # ---------------------------------------------------------------------------- #
+
+        # --- Initialize or Use Existing Parameters --- #
+        if reinitialize_params:
+            try:
+                self._log_message(f"Initializing model parameters for layers: {target_layer_dims}")
+                self.model_params = neural_net.init_params(target_layer_dims)
+                self.model_layer_dims = target_layer_dims # Store the architecture
+                self.save_button.setEnabled(False) # Can't save until trained
+                self._log_message("Model parameters initialized.")
+            except Exception as e:
+                self._log_message(f"ERROR: Unexpected error initializing model parameters: {e}")
+                self.start_button.setEnabled(True)
+                self.stop_button.setEnabled(False)
+                self.progress_bar.setVisible(False)
+                self.model_params = None # Ensure params are None on error
+                self.model_layer_dims = None
+                return
+        # ----------------------------------------- #
+
+        # --- Threading Setup --- (Ensure model_params is not None before proceeding)
+        if self.model_params is None:
+            self._log_message("ERROR: Model parameters are not available for training.")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
-            self.progress_bar.setVisible(False)
             return
-        # ------------------------------------------------------------- #
 
-        # --- Log Layer Configuration Before Training --- #
-        # (This block becomes somewhat redundant now, but can stay as a final check)
-        try:
-            if self.model_params:
-                # Re-derive dims from the newly initialized params to confirm
-                check_layer_dims = [self.model_params['W1'].shape[1]]
-                num_layers = len(self.model_params) // 2
-                for i in range(1, num_layers + 1):
-                    check_layer_dims.append(self.model_params[f'W{i}'].shape[0])
-                self._log_message(f"Confirmed layer configuration for training: {check_layer_dims}")
-            else:
-                self._log_message("WARN: Cannot log layer config - model parameters not found after initialization attempt.")
-        except KeyError as e:
-             self._log_message(f"WARN: Could not determine layer configuration from model parameters. Missing key: {e}")
-        except Exception as e:
-            self._log_message(f"WARN: An error occurred while determining layer configuration: {e}")
-        # --------------------------------------------
-
-        # --- Threading Setup ---
         self.training_thread = QThread() # Create a new thread
-        # Create worker instance with necessary data
         self.training_worker = TrainingWorker(
             self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-            self.model_params,
+            self.model_params, # Pass current (potentially existing) params
             epochs,
             learning_rate,
             patience,
-            activation_function # Pass the retrieved activation function
+            activation_function,
+            optimizer_name,
+            l2_lambda,
+            dropout_keep_prob
         )
         # Move worker to the thread
         self.training_worker.moveToThread(self.training_thread)
@@ -1108,6 +1153,7 @@ class MainWindow(QMainWindow):
                 
                 # Initialize parameters using the new structure
                 self.model_params = neural_net.init_params(layer_dims)
+                self.model_layer_dims = layer_dims # Store the architecture
                 self._log_message("Model re-initialized.")
                 self.save_button.setEnabled(False) # Disable save until trained
                 self.start_button.setEnabled(True) # Enable training
@@ -1115,12 +1161,14 @@ class MainWindow(QMainWindow):
             except ValueError as e:
                 self._log_message(f"ERROR: Invalid hidden layer configuration '{self.hidden_layers_input.text()}'. Please enter comma-separated positive integers. {e}")
                 self.model_params = None
+                self.model_layer_dims = None
                 self.start_button.setEnabled(False)
                 self.save_button.setEnabled(False)
             # -------------------------------------- #
         else:
             self._log_message("ERROR: Number of classes is 0 or unknown. Cannot initialize model parameters.")
             self.model_params = None
+            self.model_layer_dims = None
             self.start_button.setEnabled(False)
             self.save_button.setEnabled(False)
         # -------------------------------------------------------------
@@ -1209,22 +1257,50 @@ class MainWindow(QMainWindow):
         if file_path:
             try:
                 self._log_message(f"Attempting to load parameters from: {file_path}")
-                data = np.load(file_path, allow_pickle=True) # Allow pickle for potential flexibility, though not strictly needed for standard arrays
-                # Load the dictionary directly
-                self.model_params = dict(data) 
+                data = np.load(file_path, allow_pickle=True)
+                loaded_params = dict(data)
                 self._log_message("Parameters loaded successfully.")
+
+                # --- Infer Layer Dimensions from Loaded Parameters --- #
+                inferred_layer_dims = None
+                try:
+                    num_layers = len(loaded_params) // 2
+                    if num_layers > 0 and 'W1' in loaded_params:
+                        dims = [loaded_params['W1'].shape[1]] # Input size
+                        for l in range(1, num_layers + 1):
+                            key_W = f'W{l}'
+                            if key_W in loaded_params:
+                                dims.append(loaded_params[key_W].shape[0]) # Output size of layer l
+                            else:
+                                raise KeyError(f"Missing weight key {key_W}")
+                        inferred_layer_dims = dims
+                        self._log_message(f"Inferred layer dimensions from loaded file: {inferred_layer_dims}")
+                    else:
+                        self._log_message("Could not infer layer dimensions: No layers found or missing W1.")
+                except Exception as e:
+                    self._log_message(f"WARN: Error inferring layer dimensions from loaded parameters: {e}. Architecture matching might not work correctly.")
+                # -------------------------------------------------- #
+
+                # Store loaded parameters and inferred dimensions
+                self.model_params = loaded_params
+                self.model_layer_dims = inferred_layer_dims
+
                 # Reset training history as it doesn't correspond to loaded parameters
                 self.train_loss_history = []
                 self.val_accuracy_history = []
-                # Update UI based on loaded parameters (e.g., infer layer structure?)
-                # This is tricky - we don't necessarily know the layer string that created these weights
-                # For now, just enable the train button if data is also loaded
-                self._log_message("Loaded parameters might not match the current layer configuration input.")
+                self.accuracy_label.setText("Final Validation Accuracy: --") # Reset accuracy label
+
+                # Update UI based on loaded parameters
                 if self.current_dataset is not None:
                     self.start_button.setEnabled(True)
                 self.save_button.setEnabled(True) # Enable save button after loading
+                self._log_message("Loaded parameters might not match the current UI layer configuration. Training will use loaded architecture unless UI config changes.")
+                # Optionally, update the UI hidden_layers_input to match? (Can be complex/risky)
+
             except Exception as e:
                 self._log_message(f"ERROR loading parameters from {file_path}: {e}")
+                self.model_params = None # Reset on error
+                self.model_layer_dims = None
         else:
             self._log_message("Load parameters cancelled.")
 
