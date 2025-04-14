@@ -15,6 +15,12 @@ try:
 except ImportError as e:
     print(f"ERROR: Cannot import SimpleNeuralNetwork from model.neural_net - {e}")
     SimpleNeuralNetwork = None # Use None as fallback if import fails
+# --- Import CNN Model --- #
+try:
+    from model.cnn_model import CNNModel # ADD THIS IMPORT
+except ImportError as e:
+    print(f"ERROR: Cannot import CNNModel from model.cnn_model - {e}")
+    CNNModel = None # Fallback
 # ------------------------ #
 import datasets # Import datasets from top level
 from PIL import Image
@@ -183,10 +189,9 @@ class MainWindow(QMainWindow):
         self.class_names: Optional[List[str]] = None # List to store class names (e.g., ["cat", "dog", ...])
 
         # --- Model Related Attributes ---
-        self.current_model: Optional[Any] = None # Holds the instantiated model object
-        self.current_model_type: Optional[str] = None # e.g., 'SimpleNN', 'CNN'
-        self.model_params: Optional[dict] = None # Keep storing raw params for save/load compatibility for now
-        self.model_layer_dims: Optional[List[int]] = None
+        self.current_model: Optional[Any] = None # Holds the instantiated model object (SimpleNN or CNN)
+        self.current_model_type: Optional[str] = "Simple NN" # Default or track selected type, e.g., 'Simple NN', 'CNN'
+        self.model_weights_path: Optional[str] = None # Store path for Keras weights if applicable
         # --------------------------------
 
     # --- UI Group Creation Methods --- #
@@ -259,11 +264,28 @@ class MainWindow(QMainWindow):
         # Use a QVBoxLayout for arranging controls vertically within the group box.
         layout = QVBoxLayout()
 
+        # --- Model Selection --- #
+        self.model_type_combo = QComboBox()
+        self.model_type_combo.setToolTip("Select the type of neural network model to train.")
+        available_models = []
+        if SimpleNeuralNetwork:
+            available_models.append("Simple NN")
+        if CNNModel:
+            available_models.append("CNN")
+        if not available_models:
+            available_models.append("No Models Found")
+            self.model_type_combo.setEnabled(False)
+        self.model_type_combo.addItems(available_models)
+        # Connect signal if we need to dynamically change hyperparameters UI later
+        # self.model_type_combo.currentTextChanged.connect(self._on_model_type_changed)
+        layout.addRow("Model Type:", self.model_type_combo)
+        # ----------------------- #
+
         # --- Add QLineEdit for Hidden Layer Configuration ---
         config_layout = QHBoxLayout()
         config_label = QLabel("Hidden Layers (neurons, comma-separated):")
         config_layout.addWidget(config_label)
-        self.hidden_layers_input = QLineEdit("10") # Default to one hidden layer of 10 neurons
+        self.hidden_layers_input = QLineEdit("128, 64") # Default to one hidden layer of 10 neurons
         self.hidden_layers_input.setToolTip("Enter neuron counts for hidden layers, e.g., '100, 50' for two hidden layers.")
         config_layout.addWidget(self.hidden_layers_input)
         layout.addLayout(config_layout)
@@ -755,130 +777,208 @@ class MainWindow(QMainWindow):
              self._log_message("Prediction cancelled: No file selected.")
 
     def start_training(self):
+        """Initiates the model training process based on UI settings."""
         if self.X_train is None or self.Y_train is None or self.X_dev is None or self.Y_dev is None:
-            self._log_message("ERROR: No dataset loaded completely.")
+            self.log("Error: Training data not loaded or incomplete.")
             return
-        if self.training_thread is not None and self.training_thread.isRunning():
-             self._log_message("WARN: Training is already in progress.")
+        if self.num_classes <= 0:
+             self.log("Error: Number of classes not determined from loaded data.")
              return
 
-        self._log_message(f"=== Starting Training Thread for {self.dataset_dropdown.currentText()} ===") # Use dataset_dropdown
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True) # Enable stop button
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
-        QApplication.processEvents()
-
-        epochs = self.epochs_input.value()
-        learning_rate = self.learning_rate_input.value()
-        patience = self.patience_input.value()
-        activation_function = self.activation_combo.currentText()
-        optimizer_name = self.optimizer_combo.currentText()
-        l2_lambda = self.l2_lambda_input.value()
-        dropout_keep_prob = self.dropout_keep_prob_input.value()
-        self._log_message(f"Hyperparameters: Epochs={epochs}, LearnRate={learning_rate}, Patience={patience}, Activation={activation_function}, Optimizer={optimizer_name}, L2 λ={l2_lambda}, DropoutKeep={dropout_keep_prob}")
-        self.progress_bar.setMaximum(epochs)
-
-        # --- Determine Target Architecture and Check if Re-initialization is Needed --- #
-        reinitialize_params = False
-        target_layer_dims = None
-        try:
-            hidden_layers_str = self.hidden_layers_input.text().strip()
-            if hidden_layers_str:
-                hidden_dims = [int(s.strip()) for s in hidden_layers_str.split(',') if s.strip()]
-                if not all(dim > 0 for dim in hidden_dims):
-                    raise ValueError("Hidden layer dimensions must be positive integers.")
-            else:
-                hidden_dims = [] # No hidden layers
-
-            if self.X_train is None:
-                 raise ValueError("Cannot determine input size, training data not loaded.")
-            input_size = self.X_train.shape[0] # Get input size from training data
-
-            if self.current_num_classes <= 0:
-                raise ValueError("Number of classes not determined.")
-
-            target_layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
-
-            # Check if re-initialization is needed
-            if self.model_params is None:
-                self._log_message("No existing model parameters found. Initializing new model.")
-                reinitialize_params = True
-            elif self.model_layer_dims != target_layer_dims:
-                self._log_message(f"Target architecture {target_layer_dims} differs from current parameters architecture {self.model_layer_dims}. Re-initializing model.")
-                reinitialize_params = True
-            else:
-                self._log_message(f"Using existing model parameters with architecture: {self.model_layer_dims}")
-
-        except ValueError as e:
-            self._log_message(f"ERROR determining target architecture or checking for re-initialization: {e}")
-            self.start_button.setEnabled(True) # Re-enable train button on error
-            self.stop_button.setEnabled(False)
-            self.progress_bar.setVisible(False)
-            return # Stop if config is invalid
-        # ---------------------------------------------------------------------------- #
-
-        # --- Initialize or Use Existing Parameters --- #
-        if reinitialize_params:
-            try:
-                self._log_message(f"Initializing model parameters for layers: {target_layer_dims}")
-                self.model_params = neural_net.init_params(target_layer_dims)
-                self.model_layer_dims = target_layer_dims # Store the architecture
-                self.save_button.setEnabled(False) # Can't save until trained
-                self._log_message("Model parameters initialized.")
-            except Exception as e:
-                self._log_message(f"ERROR: Unexpected error initializing model parameters: {e}")
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
-                self.progress_bar.setVisible(False)
-                self.model_params = None # Ensure params are None on error
-                self.model_layer_dims = None
-                return
-        # ----------------------------------------- #
-
-        # --- Threading Setup --- (Ensure model_params is not None before proceeding)
-        if self.model_params is None:
-            self._log_message("ERROR: Model parameters are not available for training.")
-            self.start_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
+        if self.training_worker and self.training_thread and self.training_thread.isRunning():
+            self.log("Warning: Training is already in progress.")
             return
 
+        # --- Get Selected Model Type --- #
+        selected_model_type = self.model_type_combo.currentText()
+        self.current_model_type = selected_model_type # Store the selected type
+        self.log(f"Selected model type: {selected_model_type}")
+
+        # --- Prepare Data Shape Based on Model --- #
+        # This is CRITICAL and needs proper implementation based on dataset + model
+        X_train_model, X_dev_model = None, None
+        input_shape_for_model = None
+
+        # Example logic (NEEDS REFINEMENT):
+        # Assuming data loaded is (features, samples) initially from our current loaders
+        num_samples_train = self.X_train.shape[1]
+        num_features = self.X_train.shape[0]
+        num_samples_dev = self.X_dev.shape[1]
+
+        if selected_model_type == "Simple NN":
+            if num_features != 784 and num_features != 3072: # Add checks as needed
+                 self.log(f"Warning: Simple NN might not work well with {num_features} features.")
+            # Simple NN expects (features, samples) - data might already be in this shape from loader
+            X_train_model = self.X_train
+            X_dev_model = self.X_dev
+            input_shape_for_model = (num_features,) # Tuple defining the feature dimension
+            # Layer dims for SimpleNN specific structure
+            try:
+                hidden_layers = [int(x.strip()) for x in self.hidden_layers_input.text().split(',') if x.strip()]
+                self.model_layer_dims = [num_features] + hidden_layers + [self.num_classes]
+            except ValueError:
+                self.log("Error: Invalid format for Hidden Layers. Use comma-separated integers.")
+                return
+        elif selected_model_type == "CNN":
+            # CNN expects (samples, height, width, channels)
+            # Determine target shape based on features (very basic heuristic)
+            target_shape_train = None
+            target_shape_dev = None
+
+            if num_features == 784: # MNIST-like
+                input_shape_for_model = (28, 28, 1)
+                target_shape_train = (num_samples_train,) + input_shape_for_model
+                target_shape_dev = (num_samples_dev,) + input_shape_for_model
+            elif num_features == 3072: # CIFAR-10 like
+                input_shape_for_model = (32, 32, 3)
+                target_shape_train = (num_samples_train,) + input_shape_for_model
+                target_shape_dev = (num_samples_dev,) + input_shape_for_model
+            else:
+                 self.log(f"Error: Cannot determine CNN input shape for {num_features} features.")
+                 return
+
+            try:
+                # Reshape data: From (features, samples) to (samples, H, W, C)
+                # Need to transpose first to (samples, features) then reshape
+                self.log(f"Reshaping training data for CNN from {self.X_train.shape} to {target_shape_train}")
+                X_train_model = self.X_train.T.reshape(target_shape_train)
+
+                self.log(f"Reshaping validation data for CNN from {self.X_dev.shape} to {target_shape_dev}")
+                X_dev_model = self.X_dev.T.reshape(target_shape_dev)
+
+                self.log(f"Reshaped X_train: {X_train_model.shape}, X_dev: {X_dev_model.shape}")
+            except Exception as e:
+                self.log(f"Error reshaping data for CNN: {e}")
+                return
+        else:
+            self.log(f"Error: Model type '{selected_model_type}' not recognized for training.")
+            return
+
+        if X_train_model is None or X_dev_model is None or input_shape_for_model is None:
+            self.log("Error: Failed to prepare data for the selected model.")
+            return
+
+        # --- Instantiate Correct Model --- #
+        self.current_model = None # Clear previous model instance
+        if selected_model_type == "Simple NN":
+            if not SimpleNeuralNetwork:
+                self.log("Error: SimpleNeuralNetwork class not available.")
+                return
+            # Instantiate SimpleNeuralNetwork
+            try:
+                # Ensure self.model_layer_dims was set correctly above
+                if not self.model_layer_dims:
+                    raise ValueError("Model layer dimensions not calculated.")
+                self.current_model = SimpleNeuralNetwork(self.model_layer_dims) # Uses layer_dims
+                self.log(f"Instantiated SimpleNeuralNetwork with layers: {self.model_layer_dims}")
+            except Exception as e:
+                 self.log(f"Error instantiating SimpleNeuralNetwork: {e}")
+                 return
+
+        elif selected_model_type == "CNN":
+            if not CNNModel:
+                 self.log("Error: CNNModel class not available.")
+                 return
+            # Instantiate CNNModel
+            try:
+                self.current_model = CNNModel(input_shape=input_shape_for_model, num_classes=self.num_classes)
+                # CNN build_model is called separately, often before training or loading weights
+                self.current_model.build_model() # Build the architecture now
+                self.log(f"Instantiated and built CNNModel with input shape: {input_shape_for_model}")
+            except Exception as e:
+                 self.log(f"Error instantiating or building CNNModel: {e}")
+                 return
+        # -------------------------------- #
+
+
+        # --- Get Hyperparameters (Adjust based on model type if needed) --- #
+        # Currently using the same UI fields for both, may need adjustment
+        activation = self.activation_combo.currentText() # SimpleNN specific
+        optimizer_name = self.optimizer_combo.currentText() # SimpleNN specific
+        learning_rate = self.learning_rate_input.value()
+        epochs = self.epochs_input.value()
+        batch_size = self.batch_size_input.value()
+        patience = self.patience_input.value()
+        l2_lambda = self.l2_lambda_input.value() # SimpleNN specific
+        dropout_keep_prob = 1.0 - self.dropout_keep_prob_input.value() # Convert rate to keep_prob for SimpleNN
+
+        # --- Setup and Start Training Thread --- #
+        if self.current_model is None:
+            self.log("Error: Model could not be instantiated.")
+            self._set_training_ui_enabled(True) # Re-enable UI on early exit
+            return
+
+        # Prepare params dict for the worker (adapt structure as needed)
+        # NOTE: The worker needs to be adapted to handle both model types!
+        training_params = {
+            'model': self.current_model, # Pass the instantiated model object
+            'model_type': selected_model_type,
+            'X_train': X_train_model, # Pass the correctly shaped data
+            'Y_train': self.Y_train,
+            'X_dev': X_dev_model, # Pass the correctly shaped data
+            'Y_dev': self.Y_dev,
+            'epochs': epochs,
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            # Pass other relevant params (may differ based on model type)
+            # Pass ALL potentially relevant params, worker will decide what to use
+            'activation': activation,
+            'optimizer': optimizer_name,
+            'l2_lambda': l2_lambda,
+            'dropout_keep_prob': dropout_keep_prob,
+            'patience': patience,
+            'num_classes': self.num_classes, # May be needed by worker
+        }
+
+        self.log(f"Starting training thread with params: { {k: v.shape if isinstance(v, np.ndarray) else type(v) if k=='model' else v for k, v in training_params.items()} }") # Log shapes/types
+
         self.training_thread = QThread()
-        self.training_worker = TrainingWorker(
-            model=self.current_model, # Pass the model instance
-            X_train=self.X_train,
-            Y_train=self.Y_train,
-            X_dev=self.X_dev,
-            Y_dev=self.Y_dev,
-            training_params={
-                'alpha': learning_rate,
-                'epochs': epochs,
-                'patience': patience,
-                'hidden_activation': activation_function,
-                'optimizer_name': optimizer_name,
-                'l2_lambda': l2_lambda,
-                'dropout_keep_prob': dropout_keep_prob
-            }
-        )
+        # Ensure TrainingWorker is imported and available
+        if 'TrainingWorker' not in globals():
+            self.log("Error: TrainingWorker class not found.")
+            self._set_training_ui_enabled(True)
+            return
+        try:
+            # Check if TrainingWorker can be imported dynamically if needed
+            # from ui.training_worker import TrainingWorker # Might be necessary
+            self.training_worker = TrainingWorker(training_params)
+        except Exception as e:
+            self.log(f"Error initializing TrainingWorker: {e}")
+            self._set_training_ui_enabled(True)
+            return
+
         self.training_worker.moveToThread(self.training_thread)
 
-        # --- Connect Signals and Slots ---
-        # Connect worker signals to main window slots
-        self.training_worker.progress.connect(self._update_progress)
-        self.training_worker.finished.connect(self._handle_training_finished)
-        self.training_worker.log_message.connect(self._handle_worker_log)
+        # --- Connect signals from worker to main thread slots (Ensure signatures match!) ---
+        self.training_worker.progress.connect(self.update_progress) # Expects (epoch, total_epochs, loss, val_acc)
+        self.training_worker.finished.connect(self.training_finished) # Expects (history_dict or None)
+        self.training_worker.error.connect(self.training_error) # Expects (error_message_str)
+        self.training_worker.log_message.connect(self.log) # Expects (message_str)
+        # ---------------------------------------------------------------------------------- #
 
-        # Connect thread signals
-        self.training_thread.started.connect(self.training_worker.run)
-        self.training_worker.finished.connect(self.training_thread.quit)
-        self.training_worker.finished.connect(self.training_worker.deleteLater) # Schedule worker for deletion
-        self.training_thread.finished.connect(self._cleanup_thread) # Connect thread finished to cleanup slot
-        # We handle UI cleanup in _cleanup_thread via _handle_training_finished/_handle_worker_error
-        # --- End Signal/Slot Connections --- 
+        self.training_thread.started.connect(self.training_worker.run) # Start worker's run method
+        # Clean up thread object when it finishes
+        self.training_thread.finished.connect(self.training_thread.deleteLater)
+        # Also disconnect worker signals when thread finishes to avoid issues if worker deleted later
+        self.training_thread.finished.connect(self.training_worker.progress.disconnect)
+        self.training_thread.finished.connect(self.training_worker.finished.disconnect)
+        self.training_thread.finished.connect(self.training_worker.error.disconnect)
+        self.training_thread.finished.connect(self.training_worker.log_message.disconnect)
+        # Schedule worker object for deletion after thread finishes
+        self.training_thread.finished.connect(self.training_worker.deleteLater)
 
-        # Start the thread
-        self.training_thread.start()
-        self._log_message("Training thread started.")
+
+        # Disable UI during training
+        self._set_training_ui_enabled(False)
+
+        self.train_loss_history = [] # Reset histories
+        self.val_accuracy_history = []
+        self.plot_widget.reset_plot() # Clear plot
+        self.training_progress_bar.setRange(0, epochs) # Set range based on total epochs
+        self.training_progress_bar.setValue(0)
+
+        self.training_thread.start() # Start the event loop for the thread
+        self.log("Training thread start requested.")
 
     def _stop_training(self):
         """Signals the running training thread to stop gracefully."""
@@ -1115,77 +1215,189 @@ class MainWindow(QMainWindow):
 
     # --- Model Save/Load Methods ---
     def save_weights(self):
-        # Ensure we have model parameters to save
-        if not self.model_params:
-            self._log_message("ERROR: No model parameters available to save.")
+        """Saves the current model's weights to a file."""
+        if self.current_model is None:
+            self.log("Error: No model trained or loaded to save.")
             return
 
-        # Open save file dialog
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Model Parameters", "", "NumPy NPZ Files (*.npz)")
+        model_type = self.current_model_type # Get the type of the current model
 
-        if file_path:
-            # Ensure the filename ends with .npz
-            if not file_path.endswith('.npz'):
-                file_path += '.npz'
+        # Suggest a filename based on dataset and model type
+        dataset_tag = self.current_dataset_name.split(' ')[0].lower().replace('-', '_') if self.current_dataset_name else "custom"
+        model_tag = "cnn" if model_type == "CNN" else "simplenn"
+        default_filename = f"{dataset_tag}_{model_tag}_weights"
 
+        # Choose file extension based on model type
+        if model_type == "CNN":
+            # Keras common extensions: .weights.h5 (older), .keras (newer, saves architecture too sometimes)
+            file_filter = "Keras Weights (*.weights.h5 *.keras)"
+            default_filename += ".weights.h5"
+        elif model_type == "Simple NN":
+            file_filter = "NumPy Parameters (*.npz)"
+            default_filename += ".npz"
+        else:
+            self.log(f"Error: Unknown model type '{model_type}' for saving.")
+            return
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Model Weights",
+            default_filename, # Suggest filename
+            file_filter # Filter for relevant file types
+        )
+
+        if filepath:
             try:
-                # Save the entire parameters dictionary
-                np.savez(file_path, **self.model_params)
-                self._log_message(f"Parameters saved successfully to: {file_path}")
+                if model_type == "CNN":
+                    if hasattr(self.current_model, 'save_weights'):
+                        self.current_model.save_weights(filepath)
+                        self.log(f"CNN weights saved to {filepath}")
+                    else:
+                         self.log("Error: Current model object does not have 'save_weights' method.")
+                elif model_type == "Simple NN":
+                    # Ensure model_params is up-to-date from the model instance
+                    if hasattr(self.current_model, 'get_params'):
+                        self.model_params = self.current_model.get_params()
+                    else:
+                        self.log("Warning: Cannot get parameters from SimpleNN instance. Saving potentially stale data.")
+
+                    if self.model_params is not None and self.model_layer_dims is not None:
+                         params_to_save = self.model_params.copy() # Avoid modifying the main dict
+                         # Include layer dimensions for reconstruction
+                         params_to_save['_layer_dims'] = self.model_layer_dims
+                         np.savez(filepath, **params_to_save)
+                         self.log(f"Simple NN parameters (including layer dims) saved to {filepath}")
+                    else:
+                         self.log("Error: Simple NN parameters or layer dimensions missing, cannot save.")
+
             except Exception as e:
-                self._log_message(f"ERROR saving parameters to {file_path}: {e}")
+                self.log(f"Error saving weights to {filepath}: {e}")
+
 
     def load_weights(self):
-        # Open load file dialog
-        file_path, _ = QFileDialog.getOpenFileName(self, "Load Model Parameters", "", "NumPy NPZ Files (*.npz)")
+        """Loads model weights from a file."""
+        if self.X_train is None: # Need data loaded to know input/output size potentially
+             self.log("Error: Load a dataset first to define model structure.")
+             return
+        if self.num_classes <= 0:
+            self.log("Error: Number of classes not determined from loaded data.")
+            return
 
-        if file_path:
+        # Allow loading either Keras or NumPy weights
+        file_filter = "Model Weights (*.weights.h5 *.keras *.npz);;All Files (*)"
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Model Weights",
+            "", # Start in default directory
+            file_filter
+        )
+
+        if filepath:
+            self.log(f"Attempting to load weights from: {filepath}")
+            loaded_successfully = False
             try:
-                self._log_message(f"Attempting to load parameters from: {file_path}")
-                data = np.load(file_path, allow_pickle=True)
-                loaded_data = dict(data)
-                self._log_message("Parameters loaded successfully.")
+                # Determine model type based on file extension (heuristic)
+                file_extension = os.path.splitext(filepath)[1].lower()
+                loaded_model_type = None
+                input_shape_for_model = None
 
-                # --- Infer Layer Dimensions from Loaded Parameters --- #
-                inferred_layer_dims = None
-                try:
-                    num_layers = len(loaded_data) // 2
-                    if num_layers > 0 and 'W1' in loaded_data:
-                        dims = [loaded_data['W1'].shape[1]] # Input size
-                        for l in range(1, num_layers + 1):
-                            key_W = f'W{l}'
-                            if key_W in loaded_data:
-                                dims.append(loaded_data[key_W].shape[0]) # Output size of layer l
-                            else:
-                                raise KeyError(f"Missing weight key {key_W}")
-                        inferred_layer_dims = dims
-                        self._log_message(f"Inferred layer dimensions from loaded file: {inferred_layer_dims}")
+                # --- Determine Expected Input Shape Based on Currently Loaded Data --- #
+                # This logic mirrors part of start_training, needed to build model before loading weights
+                num_features = self.X_train.shape[0]
+
+                if file_extension == ".npz":
+                    loaded_model_type = "Simple NN"
+                    input_shape_for_model = (num_features,) # Used for validation
+                elif file_extension in [".h5", ".keras", ".weights.h5"]: # Common Keras extensions
+                     loaded_model_type = "CNN"
+                     # Infer shape like in start_training for CNN
+                     if num_features == 784: input_shape_for_model = (28, 28, 1)
+                     elif num_features == 3072: input_shape_for_model = (32, 32, 3)
+                     else:
+                         self.log(f"Error: Cannot determine target CNN input shape for currently loaded data ({num_features} features) to load weights.")
+                         return
+                else:
+                    self.log(f"Error: Unrecognized file extension '{file_extension}' for loading weights.")
+                    return
+
+                self.log(f"Inferred model type '{loaded_model_type}' from file extension.")
+                self.current_model_type = loaded_model_type # Update current type *before* instantiation
+
+                # --- Instantiate the Correct Model --- #
+                self.current_model = None # Clear previous model
+                if loaded_model_type == "Simple NN":
+                    if not SimpleNeuralNetwork: raise ImportError("SimpleNeuralNetwork class not available.")
+                    # Try to load layer dimensions from the file itself
+                    loaded_data = np.load(filepath, allow_pickle=True)
+                    if '_layer_dims' in loaded_data:
+                        # Need np.array(...).item() if saved as 0-dim array
+                        layer_dims_loaded = loaded_data['_layer_dims']
+                        if isinstance(layer_dims_loaded, np.ndarray) and layer_dims_loaded.ndim == 0:
+                           self.model_layer_dims = layer_dims_loaded.item()
+                        else:
+                           self.model_layer_dims = list(layer_dims_loaded) # Ensure it's a list
+
+                        self.log(f"Loaded layer dimensions from file: {self.model_layer_dims}")
+                        # Sanity check input dimension against loaded data
+                        if self.model_layer_dims[0] != num_features:
+                             raise ValueError(f"Loaded weights input size ({self.model_layer_dims[0]}) doesn't match currently loaded dataset features ({num_features}).")
+                        # Sanity check output dimension against loaded data
+                        if self.model_layer_dims[-1] != self.num_classes:
+                             raise ValueError(f"Loaded weights output size ({self.model_layer_dims[-1]}) doesn't match currently loaded dataset classes ({self.num_classes}).")
                     else:
-                        self._log_message("Could not infer layer dimensions: No layers found or missing W1.")
-                except Exception as e:
-                    self._log_message(f"WARN: Error inferring layer dimensions from loaded parameters: {e}. Architecture matching might not work correctly.")
-                # -------------------------------------------------- #
+                         raise ValueError("Cannot load Simple NN: Layer dimensions ('_layer_dims') not found in '.npz' file.")
 
-                # Store loaded parameters and inferred dimensions
-                self.model_params = loaded_data
-                self.model_layer_dims = inferred_layer_dims
+                    self.current_model = SimpleNeuralNetwork(self.model_layer_dims)
+                    self.current_model.load_params(loaded_data) # Pass the loaded data dict
+                    self.model_params = self.current_model.get_params() # Update internal params cache
+                    self.log("Simple NN model instantiated and parameters loaded.")
+                    loaded_successfully = True
 
-                # Reset training history as it doesn't correspond to loaded parameters
-                self.train_loss_history = []
-                self.val_accuracy_history = []
-                self.accuracy_label.setText("Final Validation Accuracy: --")
-                if self.current_dataset is not None:
-                    self.start_button.setEnabled(True)
-                self.save_button.setEnabled(True) # Enable save button after loading
-                self._log_message("Loaded parameters might not match the current UI layer configuration. Training will use loaded architecture unless UI config changes.")
-                # Optionally, update the UI hidden_layers_input to match? (Can be complex/risky)
+                elif loaded_model_type == "CNN":
+                    if not CNNModel: raise ImportError("CNNModel class not available.")
+                    if input_shape_for_model is None: raise ValueError("Cannot determine input shape for CNN based on loaded data.")
+
+                    # Instantiate and build the architecture FIRST, using shape derived from loaded data
+                    self.current_model = CNNModel(input_shape=input_shape_for_model, num_classes=self.num_classes)
+                    self.current_model.build_model() # Build default architecture matching expected shape
+                    # Now load the weights into the built architecture
+                    self.current_model.load_weights(filepath)
+                    # No need to store params separately, Keras model holds them
+                    self.log("CNN model instantiated, built, and weights loaded.")
+                    loaded_successfully = True
+
+                # --- Post-Load UI Updates ---
+                if loaded_successfully and self.current_model:
+                    self.log(f"Model weights loaded successfully into a '{loaded_model_type}' model.")
+                    # Update the UI dropdown to reflect the loaded model type
+                    combo_index = self.model_type_combo.findText(loaded_model_type)
+                    if combo_index >= 0:
+                        self.model_type_combo.setCurrentIndex(combo_index)
+                    else:
+                        self.log(f"Warning: Loaded model type '{loaded_model_type}' not found in dropdown.")
+
+                    self.save_button.setEnabled(True) # Can re-save
+                    self.predict_drawing_button.setEnabled(True) # Can predict
+                    self.predict_file_button.setEnabled(True)
+                    self.start_button.setEnabled(True) # Can continue training
+
+                    # Potentially clear plot/history as it's from a different session
+                    self.plot_widget.reset_plot()
+                    self.train_loss_history = []
+                    self.val_accuracy_history = []
+                    self.progress_bar.setValue(0)
+                else:
+                    # Ensure model is None if loading failed completely
+                    self.current_model = None
+                    self.current_model_type = None # Reset type if load failed
 
             except Exception as e:
-                self._log_message(f"ERROR loading parameters from {file_path}: {e}")
-                self.model_params = None # Reset on error
-                self.model_layer_dims = None
-        else:
-            self._log_message("Load parameters cancelled.")
+                self.log(f"Error loading weights from {filepath}: {e}")
+                self.current_model = None # Ensure no partial model state
+                self.current_model_type = None
+                self.save_button.setEnabled(False)
+                self.predict_drawing_button.setEnabled(False)
+                self.predict_file_button.setEnabled(False)
 
     # --- New Slot for Predicting Drawing ---
     def _predict_drawing(self):
@@ -1270,3 +1482,134 @@ class MainWindow(QMainWindow):
 
         # Show the dialog (non-modal)
         self.expanded_plot_dialog.show()
+
+    def update_progress(self, epoch: int, total_epochs: int, loss: float, val_acc: float):
+        """Updates the progress bar and plot during training.
+
+        Receives epoch (0-based), total epochs, training loss, and validation accuracy.
+        Handles potential NaN values if metrics are not available for an epoch.
+        """
+        # Progress bar shows current epoch completion (1-based for display)
+        # Ensure progress bar range is set correctly (might be done in start_training)
+        if self.progress_bar.maximum() != total_epochs:
+             self.progress_bar.setRange(0, total_epochs)
+        self.progress_bar.setValue(epoch + 1)
+
+        # Append history if data is valid (not NaN)
+        current_epoch_num = epoch + 1
+        if not np.isnan(loss):
+            # Ensure history length matches epoch number if possible
+            while len(self.train_loss_history) < current_epoch_num -1:
+                self.train_loss_history.append(np.nan) # Pad with NaN if epochs were skipped
+            if len(self.train_loss_history) == current_epoch_num -1:
+                 self.train_loss_history.append(loss)
+            elif epoch < len(self.train_loss_history): # Overwrite if needed (e.g., re-running epoch?)
+                 self.log(f"Warning: Overwriting train loss history at epoch {current_epoch_num}")
+                 self.train_loss_history[epoch] = loss
+            else: # Append if list is somehow shorter than expected
+                 self.train_loss_history.append(loss)
+
+        if not np.isnan(val_acc):
+            val_acc_percent = val_acc * 100.0 # Convert to percentage
+            while len(self.val_accuracy_history) < current_epoch_num - 1:
+                 self.val_accuracy_history.append(np.nan)
+            if len(self.val_accuracy_history) == current_epoch_num - 1:
+                 self.val_accuracy_history.append(val_acc_percent)
+            elif epoch < len(self.val_accuracy_history):
+                 self.log(f"Warning: Overwriting validation accuracy history at epoch {current_epoch_num}")
+                 self.val_accuracy_history[epoch] = val_acc_percent
+            else:
+                 self.val_accuracy_history.append(val_acc_percent)
+
+        # Update plot - find the minimum length of the two lists
+        plot_len = min(len(self.train_loss_history), len(self.val_accuracy_history))
+        epochs_axis = list(range(1, plot_len + 1))
+
+        # Pass potentially NaN-padded lists to plot widget (let it handle plotting NaNs if it can)
+        self.plot_widget.update_plot(
+             epochs_axis,
+             self.train_loss_history[:plot_len],
+             self.val_accuracy_history[:plot_len]
+         )
+
+    def training_finished(self, history: Optional[dict]):
+        """Handles successful completion of the training thread.
+
+        Receives the history dictionary (like Keras history) or None if stopped/failed.
+        """
+        # Called when the worker's finished signal is emitted
+        # Check if the signal originated from the currently active worker
+        sender_worker = self.sender()
+        if sender_worker is not self.training_worker:
+            self.log(f"Warning: Received finished signal from an old worker ({type(sender_worker)}). Ignoring.")
+            return
+
+        if history is not None:
+            self.log("Training finished successfully (worker emitted history)." + f" Keys: {list(history.keys())}")
+
+            # Extract final values from history dictionary for logging
+            final_loss = history.get('loss', [np.nan])[-1]
+            final_val_acc = history.get('val_accuracy', [np.nan])[-1]
+            if not np.isnan(final_loss):
+                 self.log(f"Final Training Loss: {final_loss:.4f}")
+            if not np.isnan(final_val_acc):
+                 # Convert to percentage if it's not already (SimpleNN provides % directly maybe?)
+                 acc_val = final_val_acc * 100.0 if final_val_acc <= 1.0 else final_val_acc
+                 self.log(f"Final Validation Accuracy: {acc_val:.2f}%")
+
+            # Ensure progress bar shows 100%
+            self.progress_bar.setValue(self.progress_bar.maximum())
+
+            # Enable save/predict buttons if model is valid
+            if self.current_model:
+                 self.save_button.setEnabled(True)
+                 self.predict_drawing_button.setEnabled(True)
+                 self.predict_file_button.setEnabled(True)
+            else:
+                 self.log("Warning: Training finished but self.current_model is None.")
+                 self.save_button.setEnabled(False)
+                 self.predict_drawing_button.setEnabled(False)
+                 self.predict_file_button.setEnabled(False)
+
+        else:
+            # This path taken if worker emits finished(None) e.g., on stop or error handled within worker
+            self.log("Training finished (worker emitted None - likely stopped or failed gracefully).")
+            self.progress_bar.setValue(0) # Reset progress bar
+            self.save_button.setEnabled(False) # Cannot save if stopped/failed
+            self.predict_drawing_button.setEnabled(False)
+            self.predict_file_button.setEnabled(False)
+
+        # --- Common cleanup for both success/failure --- #
+        self._set_training_ui_enabled(True) # Re-enable UI
+
+        # Clean up thread and worker references
+        # Thread cleanup is handled by connections to thread.finished
+        self.training_thread = None
+        self.training_worker = None
+        self.log("Training thread/worker references cleared after finished signal.")
+
+
+    def training_error(self, message: str):
+        """Handles errors reported by the training thread via the error signal."""
+        # Called when the worker's error signal is emitted
+        sender_worker = self.sender()
+        if sender_worker is not self.training_worker:
+            self.log(f"Warning: Received error signal from an old worker ({type(sender_worker)}). Ignoring.")
+            return
+
+        self.log(f"--- Training Error Signal Received ---")
+        self.log(f"ERROR: {message}")
+
+        # Reset progress bar
+        self.progress_bar.setValue(0)
+
+        # --- Common cleanup for error --- #
+        self._set_training_ui_enabled(True) # Re-enable UI
+
+        # Clean up thread and worker references
+        # Thread cleanup is handled by connections to thread.finished
+        self.training_thread = None
+        self.training_worker = None
+        self.log("Training thread/worker references cleared after error signal.")
+
+    # ... rest of the file ...
