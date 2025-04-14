@@ -2,7 +2,7 @@
 
 from PyQt5.QtCore import QObject, pyqtSignal
 import numpy as np
-from typing import Dict
+from typing import Dict, Any
 # Assuming neural_net is in the model directory relative to the main script
 try:
     # This relative import might work if ui_main is run directly and model is a sibling
@@ -34,37 +34,37 @@ class TrainingWorker(QObject):
 
     # Removed error_occurred signal, will emit finished(None) on error instead for simplicity
 
-    def __init__(self, X_train, Y_train, X_dev, Y_dev, initial_parameters: Dict[str, np.ndarray], epochs: int, alpha: float, patience: int, activation_function: str, optimizer_name: str, l2_lambda: float, dropout_keep_prob: float):
+    def __init__(self, model: Any, X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray, Y_dev: np.ndarray, training_params: Dict[str, Any]):
         super().__init__()
+        self.model = model # Store the model object instance
         self.X_train = X_train
         self.Y_train = Y_train
         self.X_dev = X_dev
         self.Y_dev = Y_dev
-        self.parameters = initial_parameters # Store the parameters dictionary
-        self.epochs = epochs
-        self.alpha = alpha
-        self.patience = patience
-        self.activation_function = activation_function # Store the selected activation
-        self.optimizer_name = optimizer_name # Store the selected optimizer
-        self.l2_lambda = l2_lambda # Store L2 lambda
-        self.dropout_keep_prob = dropout_keep_prob # Store dropout keep prob
+        self.training_params = training_params # Store dict of params like alpha, epochs, etc.
         self._is_running = True # Flag to control the loop
 
     def stop(self):
         """Signals the worker to stop training gracefully."""
         self.log_message.emit("Stop request received by worker.")
         self._is_running = False
-        # Also signal the neural_net training loop if possible (requires modification there)
-        neural_net.stop_training_flag = True # Assuming neural_net has a global flag
-
+        # Try to signal the model's training loop if it supports it
+        if hasattr(self.model, 'stop_training_flag'):
+            self.model.stop_training_flag = True
+        # Fallback for old neural_net stop flag (can be removed after neural_net is class-based)
+        # elif 'neural_net' in globals() and hasattr(neural_net, 'stop_training_flag'):
+        #      neural_net.stop_training_flag = True
 
     def run(self):
         """Runs the gradient descent training."""
         self.log_message.emit("Training worker started.")
         self._is_running = True
-        # Assuming neural_net has a stop flag capability (can be removed if not)
-        if hasattr(neural_net, 'stop_training_flag'):
-            neural_net.stop_training_flag = False # Reset flag before starting
+        # Reset stop flag on the model if possible
+        if hasattr(self.model, 'stop_training_flag'):
+            self.model.stop_training_flag = False
+        # Fallback for old neural_net stop flag (can be removed after neural_net is class-based)
+        # elif 'neural_net' in globals() and hasattr(neural_net, 'stop_training_flag'):
+        #      neural_net.stop_training_flag = False
 
         try:
             # Define the callback function to emit progress and check for stop request
@@ -79,28 +79,33 @@ class TrainingWorker(QObject):
                 self.progress.emit(percent_complete)
                 return True # Continue training
 
-            # Call gradient descent from the neural_net module
-            results_tuple = neural_net.gradient_descent(
+            # --- Pass progress callback into training_params --- #
+            # Model's train method needs to know the name of the callback parameter
+            # Let's assume the interface specifies it as 'progress_callback'
+            self.training_params['progress_callback'] = progress_callback
+            # ------------------------------------------------- #
+
+            # --- Call the model's train method --- #
+            # The model's train method should handle its own parameters internally
+            # It receives training/dev data and hyperparameters via kwargs
+            # Expected return: Tuple[Any, List[float], List[float]] -> (final_params_or_state, loss_hist, val_acc_hist)
+            # The first element could be the updated params dict, or the model state itself if needed.
+            results_tuple = self.model.train(
                 self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-                self.alpha, self.epochs,
-                self.parameters, # Pass the parameters dictionary
-                hidden_activation=self.activation_function,
-                optimizer_name=self.optimizer_name,
-                l2_lambda=self.l2_lambda,
-                dropout_keep_prob=self.dropout_keep_prob, # Pass dropout keep prob
-                progress_callback=progress_callback,
-                patience=self.patience
+                **self.training_params # Unpack the dictionary as keyword arguments
             )
+            # --------------------------------------- #
 
             if not self._is_running:
                  self.log_message.emit("Training stopped early by request.")
                  self.finished.emit(None) # Signal completion without results
             elif results_tuple is None:
-                 self.log_message.emit("Training failed or returned None.")
+                 self.log_message.emit("Training failed or model returned None.")
                  self.finished.emit(None) # Signal completion without results
             else:
                 self.log_message.emit("Training completed successfully.")
-                # results_tuple should be (final_parameters_dict, loss_history, val_acc_history)
+                # Assuming results_tuple[0] contains the updated parameters/state
+                # This might need adjustment based on the actual interface implementation
                 self.finished.emit(results_tuple) # Emit the tuple containing the dict
 
         except Exception as e:
@@ -110,4 +115,9 @@ class TrainingWorker(QObject):
             self.finished.emit(None) # Signal completion with None on error
         finally:
             self._is_running = False # Ensure flag is reset
-            neural_net.stop_training_flag = False # Reset neural_net flag
+            # Reset stop flag on the model if possible
+            if hasattr(self.model, 'stop_training_flag'):
+                self.model.stop_training_flag = False
+            # Fallback for old neural_net stop flag (can be removed after neural_net is class-based)
+            # elif 'neural_net' in globals() and hasattr(neural_net, 'stop_training_flag'):
+            #      neural_net.stop_training_flag = False

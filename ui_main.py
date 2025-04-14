@@ -9,45 +9,65 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtCore import Qt, QDateTime, QObject, pyqtSignal, QThread, QRectF, QSize # Import QSize for canvas
 import numpy as np
-from model import neural_net # Import neural_net from model
+# --- Import Model Class --- #
+try:
+    from model.neural_net import SimpleNeuralNetwork
+except ImportError as e:
+    print(f"ERROR: Cannot import SimpleNeuralNetwork from model.neural_net - {e}")
+    SimpleNeuralNetwork = None # Use None as fallback if import fails
+# ------------------------ #
 import datasets # Import datasets from top level
 from PIL import Image
 import os
 from PyQt5 import QtGui # Keep QtGui import for QTextCursor
 import glob # Import glob for file searching
-from typing import Optional, Dict, Any, List # For worker thread typing
+from typing import Optional, Dict, Any, List, Tuple # Added Tuple
+import pickle # Import pickle for CIFAR-10 loading
 
-# --- Add ui directory to path ---
-ui_dir = os.path.join(os.path.dirname(__file__), 'ui')
-if ui_dir not in sys.path:
-    sys.path.insert(0, ui_dir)
+# --- Local UI Component Imports --- #
+# Moved these back to top level
 try:
-    from drawing_canvas import DrawingCanvas
+    from ui.drawing_canvas import DrawingCanvas
 except ImportError as e:
     print(f"ERROR: Could not import DrawingCanvas. Make sure ui/drawing_canvas.py exists: {e}")
-    # Define a dummy class to prevent NameError if import fails
-    class DrawingCanvas(QWidget):
+    class DrawingCanvas(QWidget): # Dummy class if import fails
         def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); QLabel("Error loading DrawingCanvas", self)
         def clearCanvas(self): pass
         def getDrawingArray(self): return None
         def getPreviewPixmap(self): return None
 
 try:
-    from plot_widget import PlotWidget
+    from ui.plot_widget import PlotWidget
 except ImportError as e:
     print(f"ERROR: Could not import PlotWidget. Make sure ui/plot_widget.py exists: {e}")
-    # Define a dummy class
-    class PlotWidget(QWidget):
+    class PlotWidget(QWidget): # Dummy class
         def __init__(self, *args, **kwargs): super().__init__(*args, **kwargs); QLabel("Error loading PlotWidget", self)
         def update_plot(self, *args, **kwargs): pass
 
-# --- Local UI Component Imports ---
-from ui.training_worker import TrainingWorker
-from ui.probability_bar_graph import ProbabilityBarGraph
+try:
+    from ui.training_worker import TrainingWorker
+except ImportError as e:
+    print(f"ERROR: Could not import TrainingWorker: {e}")
+    class TrainingWorker(QObject): pass # Dummy
+
+try:
+    from ui.probability_bar_graph import ProbabilityBarGraph
+except ImportError as e:
+    print(f"ERROR: Could not import ProbabilityBarGraph: {e}")
+    class ProbabilityBarGraph(QWidget): pass # Dummy
+# ---------------------------------- #
 
 # --- Main Application Execution --- #
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    # --- Temporary Patch for Model Import --- #
+    # Try importing the class-based model again here, just before creating MainWindow
+    try:
+        from model.neural_net import SimpleNeuralNetwork
+    except ImportError:
+        print("WARN: Could not import SimpleNeuralNetwork at runtime. Using fallback.")
+        SimpleNeuralNetwork = None
+    # -------------------------------------- #
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
@@ -161,6 +181,13 @@ class MainWindow(QMainWindow):
         self.train_loss_history: List[float] = []
         self.val_accuracy_history: List[float] = []
         self.class_names: Optional[List[str]] = None # List to store class names (e.g., ["cat", "dog", ...])
+
+        # --- Model Related Attributes ---
+        self.current_model: Optional[Any] = None # Holds the instantiated model object
+        self.current_model_type: Optional[str] = None # e.g., 'SimpleNN', 'CNN'
+        self.model_params: Optional[dict] = None # Keep storing raw params for save/load compatibility for now
+        self.model_layer_dims: Optional[List[int]] = None
+        # --------------------------------
 
     # --- UI Group Creation Methods --- #
 
@@ -478,21 +505,13 @@ class MainWindow(QMainWindow):
         self._log_message("Scanning for datasets...")
         self.datasets_info = {} # Reset discovered datasets
 
-        # --- Determine base path for data directory --- #
         if getattr(sys, 'frozen', False):
-            # Running in a PyInstaller bundle
             base_path = sys._MEIPASS
-            self._log_message(f"Running bundled, using MEIPASS: {base_path}")
         else:
-            # Running as a normal script
             base_path = os.path.dirname(os.path.abspath(__file__))
-            self._log_message(f"Running as script, using script dir: {base_path}")
-            
         data_dir = os.path.join(base_path, "data")
         self._log_message(f"Looking for datasets in: {data_dir}")
-        # --------------------------------------------- #
 
-        # --- Check for specific known files/patterns using data_dir --- #
         # MNIST Check
         mnist_path = os.path.join(data_dir, "train.csv")
         if os.path.exists(mnist_path):
@@ -502,10 +521,8 @@ class MainWindow(QMainWindow):
         # Emoji Check
         emoji_path = os.path.join(data_dir, "emojis.csv")
         if os.path.exists(emoji_path):
-            # Add entries for different image providers within the emoji CSV
             self.datasets_info["Emoji (CSV - Google)"] = {"type": "emoji", "path": emoji_path, "provider": "Google"}
             self.datasets_info["Emoji (CSV - Apple)"] = {"type": "emoji", "path": emoji_path, "provider": "Apple"}
-            # Add more providers here if needed (e.g., Twitter)
             self._log_message("Found Emoji dataset (emojis.csv)")
 
         # QuickDraw Check
@@ -513,7 +530,6 @@ class MainWindow(QMainWindow):
         if os.path.isdir(quickdraw_dir):
             npy_files = glob.glob(os.path.join(quickdraw_dir, "*.npy"))
             if npy_files:
-                # Create a mapping from file path to a unique category index (0, 1, 2...)
                 npy_map = {path: i for i, path in enumerate(sorted(npy_files))}
                 self.datasets_info["QuickDraw (Multiple NPY)"] = {"type": "quickdraw", "npy_map": npy_map}
                 self._log_message(f"Found {len(npy_files)} QuickDraw NPY files.")
@@ -522,7 +538,15 @@ class MainWindow(QMainWindow):
         else:
             self._log_message(f"QuickDraw directory not found: {quickdraw_dir}")
 
-        # self.populate_dataset_dropdown() # REMOVE call from here
+        # --- CIFAR-10 Check --- #
+        cifar10_dir = os.path.join(data_dir, 'cifar-10-batches-py')
+        # Check for existence of a key file, e.g., batches.meta
+        if os.path.exists(os.path.join(cifar10_dir, 'batches.meta')):
+            self.datasets_info["CIFAR-10"] = {"type": "cifar10", "path": data_dir} # Store base data dir
+            self._log_message("Found CIFAR-10 dataset directory.")
+        else:
+            self._log_message(f"CIFAR-10 directory ('{cifar10_dir}') or key file not found.")
+        # ---------------------- #
 
     # --- New method to populate dataset dropdown ---
     def _on_dataset_selected(self):
@@ -568,68 +592,77 @@ class MainWindow(QMainWindow):
         # QApplication.processEvents() # Generally avoid in slots connected to threads
 
     # New slots to handle signals from the worker
-    def _handle_training_finished(self, results):
-        # This slot is called when the TrainingWorker's finished signal is emitted
-        self.progress_bar.setValue(100) # Ensure progress bar shows 100%
-        self.start_button.setEnabled(True) # Re-enable start button
-        self.stop_button.setEnabled(False) # Disable stop button
-        self.training_group.setEnabled(True) # Re-enable training controls
+    def _handle_training_finished(self, results: Optional[Tuple[Any, List[float], List[float]]]):
+        self.progress_bar.setValue(100)
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.training_group.setEnabled(True)
 
-        # Stop the loading animation in the plot widget
-        # if self.plot_widget: # REMOVED - No embedded plot widget
-        #     self.plot_widget.stop_loading_animation()
-
+        # Stop the loading animation in the expanded plot if it exists
+        if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible():
+            dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
+            if dialog_plot_widget and hasattr(dialog_plot_widget, 'stop_loading_animation'):
+                dialog_plot_widget.stop_loading_animation() # Assuming PlotWidget has this
 
         if results is None:
             self._log_message("Training did not complete successfully or was stopped.")
-            self.accuracy_label.setText("Final Validation Accuracy: --") # Reset accuracy label
+            self.accuracy_label.setText("Final Validation Accuracy: --")
         else:
-            parameters_dict, loss_hist, val_acc_hist = results # Unpack the results tuple
-            self._log_message(f"Training finished. Final Loss: {loss_hist[-1]:.4f} (Lowest: {min(loss_hist):.4f})")
+            try:
+                # --- Get Updated Parameters/State from Model --- #
+                # Assuming results[0] is the parameters dict for now
+                # This needs refinement based on the model interface
+                updated_params, loss_hist, val_acc_hist = results
+                if isinstance(updated_params, dict):
+                    # Update the stored raw parameters (for saving)
+                    self.model_params = updated_params
+                    # Update the model object itself if it has a load_params method
+                    if self.current_model and hasattr(self.current_model, 'load_params'):
+                        self.current_model.load_params(updated_params)
+                        self._log_message("Updated current model instance with trained parameters.")
+                    else:
+                        self._log_message("Stored trained parameters, but couldn't update model instance.")
+                else:
+                     self._log_message("WARN: First element returned by worker was not a dict, cannot update parameters.")
+                     # Decide how to handle this - maybe results[0] *is* the updated model?
+                # ----------------------------------------------- #
 
-            # Update model parameters with the results from the worker thread
-            self.model_params = parameters_dict # Store the dictionary
-            self._log_message(f"Model parameters updated. {len(self.model_params)} parameter arrays.")
+                self._log_message(f"Training finished. Final Loss: {loss_hist[-1]:.4f} (Lowest: {min(loss_hist):.4f})" if loss_hist else "Training finished. No loss history.")
 
-            # Update the plot with final history
-            self.train_loss_history = loss_hist
-            self.val_accuracy_history = val_acc_hist
-            # if self.plot_widget: # REMOVED - No embedded plot widget
-            #     self.plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
+                # Update history and plot
+                self.train_loss_history = loss_hist
+                self.val_accuracy_history = val_acc_hist
+                if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible():
+                    dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
+                    if dialog_plot_widget:
+                        try:
+                            dialog_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
+                            self._log_message("Updated expanded plot with final history.")
+                        except Exception as e:
+                            self._log_message(f"Error updating expanded plot: {e}")
 
-            # Also update the expanded plot if it's open
-            if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible(): # Check if dialog exists and is visible
-                 # Find the plot widget within the dialog
-                 dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
-                 if dialog_plot_widget:
-                     try:
-                         # Pass history data to the dialog's plot widget
-                         dialog_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
-                         self._log_message("Updated expanded plot with final history.")
-                     except Exception as e:
-                         self._log_message(f"Error updating expanded plot: {e}")
-                 else:
-                     self._log_message("Warning: Could not find PlotWidget in expanded dialog to update.")
+                # Update accuracy label
+                if val_acc_hist:
+                    final_accuracy = val_acc_hist[-1] * 100
+                    self.accuracy_label.setText(f"Final Validation Accuracy: {final_accuracy:.2f}%")
+                    self._log_message(f"Final Validation Accuracy: {final_accuracy:.2f}%")
+                else:
+                    self.accuracy_label.setText("Final Validation Accuracy: N/A")
+                    self._log_message("No validation accuracy history received.")
 
-            # Update accuracy label with the final validation accuracy
-            if val_acc_hist:
-                final_accuracy = val_acc_hist[-1] * 100 # Convert to percentage
-                self.accuracy_label.setText(f"Final Validation Accuracy: {final_accuracy:.2f}%")
-                self._log_message(f"Final Validation Accuracy: {final_accuracy:.2f}%")
-            else:
-                self.accuracy_label.setText("Final Validation Accuracy: N/A")
-                self._log_message("No validation accuracy history received.")
+                # Enable saving and prediction if model exists
+                if self.current_model or self.model_params:
+                    self.save_button.setEnabled(True)
+                    self.predict_drawing_button.setEnabled(True)
+                    self.predict_file_button.setEnabled(True)
 
+            except Exception as e:
+                 self._log_message(f"ERROR processing training results: {e}")
+                 import traceback
+                 traceback.print_exc()
+                 self.accuracy_label.setText("Error processing results.")
 
-            # Update UI elements that depend on having a trained model
-            self.save_button.setEnabled(True)
-            # Enable prediction only if a model is trained
-            self.predict_drawing_button.setEnabled(True)
-            self.predict_file_button.setEnabled(True)
-
-
-        # Clean up the thread and worker object
-        self._cleanup_thread() # Important to release resources
+        self._cleanup_thread() # Cleanup worker/thread regardless
 
     def _handle_worker_log(self, message):
         # Simple pass-through logging for now
@@ -643,13 +676,8 @@ class MainWindow(QMainWindow):
     def _cleanup_thread(self):
         """Cleans up thread/worker objects and resets UI state. Called via thread.finished signal."""
         self._log_message("Cleaning up training thread resources...")
-        # Thread should already be finished, no need to quit/wait
-        # if self.training_thread is not None:
-        #     self.training_thread.quit()
-        #     self.training_thread.wait() 
         self.training_thread = None
         self.training_worker = None
-        # Reset UI elements
         self.start_button.setEnabled(True) 
         self.stop_button.setText("Stop Training") # Reset text
         self.stop_button.setEnabled(False)
@@ -689,22 +717,21 @@ class MainWindow(QMainWindow):
                 scaled_pixmap = qpixmap_orig.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.image_preview_label.setPixmap(scaled_pixmap)
 
-                self._log_message("Running forward propagation...")
-                if not hasattr(self, 'model_params') or not self.model_params:
-                     self._log_message("ERROR: Model parameters not loaded. Load weights first.")
-                     self.image_preview_label.setText("Load weights first.")
-                     self.probability_graph.clear_graph()
-                     return # Exit the try block and method if no model
-
-                # Perform forward propagation using the parameters dictionary
-                AL, _, status = neural_net.forward_prop(img_array, self.model_params)
-                if not status:
-                    self._log_message("ERROR: Forward propagation failed when getting probabilities.")
+                self._log_message("Running forward propagation on drawing...")
+                if self.current_model is None or not hasattr(self.current_model, 'predict'):
+                    self._log_message("ERROR: Model not loaded/trained or has no predict method.")
+                    self.image_preview_label.setText("Model not ready.")
                     self.probability_graph.clear_graph()
                     return
 
-                prediction = np.argmax(AL) # Get predicted class index
-                probabilities = AL.flatten()
+                probabilities = self.current_model.predict(img_array)
+                if probabilities is None:
+                    self._log_message("ERROR: Model prediction failed.")
+                    self.probability_graph.clear_graph()
+                    return
+
+                prediction = np.argmax(probabilities)
+                probabilities = probabilities.flatten()
 
                 # --- Get Class Name --- #
                 predicted_name = str(prediction) # Default to index string
@@ -714,14 +741,14 @@ class MainWindow(QMainWindow):
                     display_names = self.class_names # Use names for graph labels
                     self._log_message(f"Prediction Result: Index={prediction}, Name='{predicted_name}'")
                 else:
-                    self._log_message(f"Prediction Result: Index={prediction} (No class name mapping found or index out of range)")
+                    self._log_message(f"Prediction Result: Index={prediction} (No class name mapping)")
                 # -------------------- #
 
                 # Update probability bar graph with probabilities and class names (if available)
                 self.probability_graph.set_probabilities(probabilities, predicted_name, display_names)
 
             except Exception as e:
-                self._log_message(f"ERROR during prediction process: {e}")
+                self._log_message(f"ERROR during prediction: {e}")
                 self.image_preview_label.setText("Error loading/predicting.")
                 self.probability_graph.clear_graph()
         else:
@@ -731,7 +758,6 @@ class MainWindow(QMainWindow):
         if self.X_train is None or self.Y_train is None or self.X_dev is None or self.Y_dev is None:
             self._log_message("ERROR: No dataset loaded completely.")
             return
-        # Prevent starting a new thread if one is already running
         if self.training_thread is not None and self.training_thread.isRunning():
              self._log_message("WARN: Training is already in progress.")
              return
@@ -817,19 +843,23 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
             return
 
-        self.training_thread = QThread() # Create a new thread
+        self.training_thread = QThread()
         self.training_worker = TrainingWorker(
-            self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-            self.model_params, # Pass current (potentially existing) params
-            epochs,
-            learning_rate,
-            patience,
-            activation_function,
-            optimizer_name,
-            l2_lambda,
-            dropout_keep_prob
+            model=self.current_model, # Pass the model instance
+            X_train=self.X_train,
+            Y_train=self.Y_train,
+            X_dev=self.X_dev,
+            Y_dev=self.Y_dev,
+            training_params={
+                'alpha': learning_rate,
+                'epochs': epochs,
+                'patience': patience,
+                'hidden_activation': activation_function,
+                'optimizer_name': optimizer_name,
+                'l2_lambda': l2_lambda,
+                'dropout_keep_prob': dropout_keep_prob
+            }
         )
-        # Move worker to the thread
         self.training_worker.moveToThread(self.training_thread)
 
         # --- Connect Signals and Slots ---
@@ -903,284 +933,139 @@ class MainWindow(QMainWindow):
         self._log_message(f"--- Loading Dataset: {selected_dataset_key} --- ")
         dataset_info = self.datasets_info[selected_dataset_key]
         dataset_type = dataset_info.get("type")
-        dataset_path = dataset_info.get("path")
-        label_col_idx = self.label_col_input.value() # Get from UI for CSV
+        base_data_path = dataset_info.get("path") # Path to file or base dir
 
-        # --- Dispatch based on type stored in datasets_info ---
+        # Reset data before loading
+        self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
+        self.current_num_classes = 0
+        self.class_names = None
+        loaded_data: Optional[Tuple] = None # Use generic tuple type
+
+        # Dispatch based on type
         if dataset_type == "csv":
-             self._log_message(f"Loading CSV from: {dataset_path}")
-             # Pass default validation split, assumes standard CSV layout (label col 0, pixel data)
-             # Custom CSV uploads are handled by upload_csv_dataset method
-             self._load_csv_internal(selected_dataset_key, dataset_path, label_col_idx=0)
+             label_col_idx = 0 # Default for MNIST
+             self._log_message(f"Loading CSV: {selected_dataset_key} from {base_data_path}")
+             loaded_data = datasets.load_csv_dataset(base_data_path, label_col_index=label_col_idx)
         elif dataset_type == "emoji":
-             provider = dataset_info.get("provider", "Google") # Default to Google if not specified
-             self._log_message(f"Loading Emojis ({provider}) from: {dataset_path}")
-             self._load_emoji_internal(selected_dataset_key, dataset_path, image_col=provider)
+             provider = dataset_info.get("provider", "Google")
+             self._log_message(f"Loading Emojis ({provider}) from: {base_data_path}")
+             # Emoji loader returns 6 items, including class names
+             loaded_data_emoji = datasets.load_emoji_dataset(base_data_path, image_column=provider)
+             if loaded_data_emoji[0] is not None: # Check if load was successful
+                 self.X_train, self.Y_train, self.X_dev, self.Y_dev, self.current_num_classes, self.class_names = loaded_data_emoji
+             else:
+                 loaded_data = None # Signal failure
         elif dataset_type == "quickdraw":
              npy_map = dataset_info.get("npy_map")
              if npy_map:
                  self._log_message(f"Loading QuickDraw (Multiple NPY) - {len(npy_map)} categories")
-                 # Pass validation_split (using default 0.1 from datasets.py for NPY)
-                 self._load_multiple_npy_internal(selected_dataset_key, npy_map)
+                 loaded_data = datasets.load_multiple_npy_datasets(npy_map)
+                 # Extract class names from the map keys
+                 if loaded_data[0] is not None:
+                     sorted_items = sorted(npy_map.items(), key=lambda item: item[1])
+                     self.class_names = [os.path.splitext(os.path.basename(path))[0].replace("_", " ") for path, index in sorted_items]
              else:
-                 self._log_message("ERROR: QuickDraw type selected, but no npy_map found in dataset info.")
+                 self._log_message("ERROR: QuickDraw type selected, but no npy_map found.")
+                 loaded_data = None
+        elif dataset_type == "cifar10":
+             self._log_message(f"Loading CIFAR-10 from base directory: {base_data_path}")
+             loaded_data = datasets.load_cifar10_dataset(base_data_path)
+             # Try to load class names (specific to CIFAR-10 loader)
+             if loaded_data[0] is not None:
+                  # Attempt to get class names (assuming loader might provide them or we load meta separately)
+                  cifar10_dir = os.path.join(base_data_path, 'cifar-10-batches-py')
+                  meta_file = os.path.join(cifar10_dir, 'batches.meta')
+                  try:
+                      with open(meta_file, 'rb') as fo:
+                           meta_dict = pickle.load(fo, encoding='bytes')
+                      if meta_dict and b'label_names' in meta_dict:
+                           self.class_names = [name.decode('utf-8') for name in meta_dict[b'label_names']]
+                           self._log_message(f"Loaded CIFAR-10 class names: {self.class_names}")
+                  except Exception as e:
+                       self._log_message(f"WARN: Could not load/read CIFAR-10 class names from meta file: {e}")
         else:
-            self._log_message(f"ERROR: Unknown dataset type '{dataset_type}' for '{selected_dataset_key}'. Cannot load.")
-            # Handle unknown types or specific cases if needed
+            self._log_message(f"ERROR: Unknown dataset type '{dataset_type}'.")
+            loaded_data = None
 
-        self._log_message("--- Dataset Loading Attempt Finished --- ")
-
-    # --- Dataset Loading Handlers (Called by load_selected_dataset or upload) ---
-
-    def _handle_load_mnist(self, label_col_idx):
-        # This specific handler is now likely OBSOLETE because loading is based on
-        # self.datasets_info type. Keeping it for reference, but it won't be called
-        # by the refactored load_selected_dataset.
-        """Handles loading the predefined MNIST dataset."""
-        csv_path = "data/train.csv"
-        self._load_csv_internal("MNIST", csv_path, label_col_idx)
-
-    def _handle_load_quickdraw_all(self):
-        # OBSOLETE - Handled by type 'quickdraw' in load_selected_dataset
-        """Handles loading the 'QuickDraw: All Categories' dataset."""
-        selected_dataset = "QuickDraw: All Categories"
-        if self.num_quickdraw_classes > 1 and self.quickdraw_files_map:
-            # Build the map of path -> index needed by the multi-loader
-            path_index_map = {path: index for display_name, path in self.quickdraw_files_map.items()
-                                for dn, index in self.quickdraw_category_map.items() if dn == display_name}
-            # Pass validation_split (using default 0.1 from datasets.py for NPY)
-            self._load_multiple_npy_internal(selected_dataset, path_index_map)
-        else:
-            self._log_message("ERROR: Cannot load 'All Categories'. Need >= 2 QuickDraw .npy files.")
-            self.training_group.setTitle("Training Controls (Load failed)")
-
-    def _handle_load_quickdraw_single(self, selected_dataset):
-        # OBSOLETE - Single QuickDraw files are not handled by this structure anymore.
-        # Loading multiple NPYs is the supported QuickDraw method via scan_datasets.
-        """Handles loading a single QuickDraw category dataset."""
-        category_name = selected_dataset.replace("QuickDraw: ", "")
-        npy_path = os.path.join("data/quickdraw/", f"{category_name}.npy")
-        if selected_dataset in self.quickdraw_category_map:
-            category_index = self.quickdraw_category_map[selected_dataset]
-            num_classes = self.num_quickdraw_classes # Total classes
-            # Pass validation_split (using default 0.1 from datasets.py for NPY)
-            self._load_npy_internal(selected_dataset, npy_path, category_index, num_classes)
-        else:
-            self._log_message(f"ERROR: Could not find category index for '{selected_dataset}'. Rescanning might be needed.")
-            self.training_group.setTitle("Training Controls (Load failed)")
-
-    def _handle_load_emojis(self):
-        # OBSOLETE - Handled by type 'emoji' in load_selected_dataset
-        """Handles loading the predefined Emojis dataset."""
-        emoji_path = "data/emojis.csv"
-        # Pass validation_split (using default 0.1 from datasets.py for emoji)
-        self._load_emoji_internal("Emojis", emoji_path)
-
-    def _handle_load_unknown(self, selected_dataset):
-        # OBSOLETE - Logic is now contained within load_selected_dataset
-        """Handles cases where the selected dataset is not a known predefined one."""
-        self._log_message(f"WARN: Loading logic for '{selected_dataset}' not handled by predefined loaders.")
-        # Attempt to treat as already loaded if it's in the combo (might be an uploaded CSV)
-        if self.X_train is not None and self.dataset_dropdown.currentText() == selected_dataset: # Use dataset_dropdown
-            self._log_message(f"Assuming '{selected_dataset}' refers to the currently loaded (uploaded) data. No reload performed.")
-            # Optionally, re-run _post_load_update to ensure consistency?
-            # self._post_load_update(selected_dataset)
-        else:
-            self._log_message(f"ERROR: Cannot load '{selected_dataset}'. Select a known dataset or upload a new CSV.")
-            # Reset potentially partially loaded data if it wasn't the current one
+        # --- Process results common to most loaders (except Emoji, handled above) ---
+        if dataset_type != "emoji" and loaded_data is not None and len(loaded_data) == 5:
+             self.X_train, self.Y_train, self.X_dev, self.Y_dev, self.current_num_classes = loaded_data
+        elif dataset_type != "emoji" and loaded_data is None:
+            # Load failed, ensure vars are None
             self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
             self.current_num_classes = 0
-            self.model_params = None
-            self.training_group.setTitle("Training Controls (Load failed)")
+        # ---------------------------------------------------------------------------
 
-    # --- Helper method for loading CSV (internal logic) ---
-    def _load_csv_internal(self, dataset_name, csv_path, label_col_idx,
-                         validation_split=1000, # Default validation for CSV
-                         image_col_index=None, image_col_type=None):
-        # Log the parameters being used
-        log_params = f"LabelCol={label_col_idx}"
-        if image_col_index is not None:
-            log_params += f", ImageCol={image_index}, ImageType={image_type}"
-        else:
-            log_params += f", NumClasses(Default)={validation_split}"
-        self._log_message(f"Loading CSV: {dataset_name} from {csv_path} ({log_params})")
-
-        # Reset existing data before loading new
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
-        # Pass image column info to the loader function
-        loaded_data = datasets.load_csv_dataset(csv_path,
-                                                label_col_index=label_col_idx,
-                                                image_col_index=image_col_index,
-                                                image_col_type=image_col_type,
-                                                validation_split=validation_split)
-        # Unpack results (loader now returns 5 items)
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev, determined_num_classes = loaded_data
-
+        # Update UI based on load success/failure
         if self.X_train is not None:
-            self._log_message(f"Dataset '{dataset_name}' loaded successfully.")
-            # Store num_classes (use determined value if available, else default)
-            self.current_num_classes = determined_num_classes if determined_num_classes > 0 else validation_split
-            self._log_message(f"Using {self.current_num_classes} classes for model initialization.")
-            self._post_load_update(dataset_name)
+            self._log_message(f"Dataset '{selected_dataset_key}' loaded successfully.")
+            self.current_dataset_name = selected_dataset_key
+            self._post_load_update(selected_dataset_key)
         else:
-            self._log_message(f"ERROR: Failed to load {dataset_name} from {csv_path}. Check file, format, and column indices/type.")
+            self._log_message(f"ERROR: Failed to load dataset '{selected_dataset_key}'.")
             self.training_group.setTitle("Training Controls (Load failed)")
+            self.start_button.setEnabled(False)
+            self.current_dataset_name = None
 
-    # --- Helper method for loading NPY (internal logic) ---
-    def _load_npy_internal(self, dataset_name, npy_path, category_index, num_classes, validation_split=0.1):
-        self._log_message(f"Loading NPY: {dataset_name} from {npy_path} (Category Index: {category_index}, Total QD Classes: {num_classes})")
-        # Reset existing data before loading new
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
-        self.class_names = None # Reset class names
-        # Pass category_index, num_classes, and validation_split to the loader function
-        loaded_data = datasets.load_npy_dataset(npy_path, category_index, num_classes, validation_split=validation_split)
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev, loaded_num_classes = loaded_data
-
-        if self.X_train is not None:
-            self._log_message(f"Dataset '{dataset_name}' loaded successfully.")
-            # Store num_classes for potential use in training setup
-            self.current_num_classes = num_classes
-
-            # --- Extract class names from path_index_map --- #
-            if path_index_map:
-                # Create a list of names, sorted by index
-                # Assumes map is {path: index}
-                sorted_items = sorted(path_index_map.items(), key=lambda item: item[1]) # Sort by index
-                self.class_names = [os.path.splitext(os.path.basename(path))[0].replace("_", " ") for path, index in sorted_items]
-                self._log_message(f"Loaded class names: {self.class_names}")
-            else:
-                self.class_names = None
-            # -------------------------------------------------- #
-
-            self._post_load_update(dataset_name)
-        else:
-            self._log_message(f"ERROR: Failed to load {dataset_name} from {npy_path}. Check file format and ensure it contains valid data.")
-            self.training_group.setTitle("Training Controls (Load failed)")
-            self.class_names = None # Reset class names on failure
-
-    # --- Helper method for loading multiple NPY (internal logic) ---
-    def _load_multiple_npy_internal(self, dataset_name, path_index_map, validation_split=0.1):
-        self._log_message(f"Loading Multiple NPY: {dataset_name}")
-        self._log_message(f"Combining {len(path_index_map)} categories...")
-        # Reset existing data before loading new
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
-        # Call the new loader function
-        loaded_data = datasets.load_multiple_npy_datasets(path_index_map, validation_split=validation_split)
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev, loaded_num_classes = loaded_data
-
-        if self.X_train is not None:
-            self._log_message(f"Combined dataset '{dataset_name}' loaded successfully.")
-            # Store num_classes for potential use in training setup
-            self.current_num_classes = loaded_num_classes # Use num_classes returned by loader
-
-            # --- Extract class names from path_index_map --- #
-            if path_index_map:
-                # Create a list of names, sorted by index
-                # Assumes map is {path: index}
-                sorted_items = sorted(path_index_map.items(), key=lambda item: item[1]) # Sort by index
-                self.class_names = [os.path.splitext(os.path.basename(path))[0].replace("_", " ") for path, index in sorted_items]
-                self._log_message(f"Loaded class names: {self.class_names}")
-            else:
-                self.class_names = None
-            # -------------------------------------------------- #
-
-            self._post_load_update(dataset_name)
-        else:
-            self._log_message(f"ERROR: Failed to load combined dataset '{dataset_name}'. Check logs for details.")
-            self.training_group.setTitle("Training Controls (Load failed)")
-            self.class_names = None # Reset class names on failure
-
-    # --- Helper method for loading Emoji CSV (internal logic) ---
-    def _load_emoji_internal(self, dataset_name, csv_path, image_col='Google', validation_split=0.1):
-        self._log_message(f"Loading Emoji CSV: {dataset_name} from {csv_path} using '{image_col}' images")
-        # Reset existing data
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
-        # Call the dataset loader
-        loaded_data = datasets.load_emoji_dataset(csv_path, image_column=image_col, validation_split=validation_split)
-        # Unpack the 6 results: Xtr, Ytr, Xdev, Ydev, n_classes, names
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev, loaded_num_classes, self.class_names = loaded_data
-
-        if self.X_train is not None:
-            self._log_message(f"Dataset '{dataset_name}' loaded successfully.")
-
-            # Determine num_classes from the value returned by the loader
-            self.current_num_classes = loaded_num_classes
-
-            # --- Log loaded class names --- #
-            if self.class_names:
-                self._log_message(f"Loaded {len(self.class_names)} emoji class names.") # e.g. {self.class_names[:5]}...")
-            else:
-                self._log_message("WARN: Emoji loader did not return class names. Cannot display names in predictions.")
-            # ----------------------------- #
-
-            if self.current_num_classes > 0:
-                 self._log_message(f"Using {self.current_num_classes} classes for Emojis.")
-                 self._post_load_update(dataset_name)
-            else:
-                 self._log_message(f"ERROR: Loader returned 0 classes for {dataset_name}. Load failed.")
-                 self.training_group.setTitle("Training Controls (Load failed)")
-                 self.class_names = None # Ensure reset on failure
-
-        else:
-            self._log_message(f"ERROR: Failed to load {dataset_name} from {csv_path}. Check file format and image data.")
-            self.training_group.setTitle("Training Controls (Load failed)")
-            self.class_names = None # Ensure reset on failure
+        self._log_message("--- Dataset Loading Attempt Finished --- ")
 
     # --- Helper method to update UI after successful load ---
     def _post_load_update(self, dataset_name):
         # Enable the training group now that data is loaded
         self.training_group.setEnabled(True)
-        self.training_group.setTitle(f"Training Controls ({dataset_name})") # Update title
-        self.train_loss_history = [] # Reset history when new dataset loaded
+        self.training_group.setTitle(f"Training Controls ({dataset_name}) ({self.current_model_type or 'No Model'})")
+        self.train_loss_history = []
         self.val_accuracy_history = []
 
-        # --- Re-initialize model parameters for the new dataset size ---
-        if self.current_num_classes > 0:
-            # --- Get layer dimensions from UI --- #
-            try:
-                hidden_layers_str = self.hidden_layers_input.text().strip()
-                if hidden_layers_str:
-                    hidden_dims = [int(s.strip()) for s in hidden_layers_str.split(',') if s.strip()]
-                    if not all(dim > 0 for dim in hidden_dims):
-                        raise ValueError("Hidden layer dimensions must be positive integers.")
-                else:
-                    hidden_dims = [] # No hidden layers if input is empty
-                
-                # Construct full layer dimensions: [input_size] + hidden_dims + [output_size]
-                input_size = 784 # Assuming 28x28 input images
-                layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
-                self._log_message(f"Re-initializing model with layers: {layer_dims}")
-                
-                # Initialize parameters using the new structure
-                self.model_params = neural_net.init_params(layer_dims)
-                self.model_layer_dims = layer_dims # Store the architecture
-                self._log_message("Model re-initialized.")
-                self.save_button.setEnabled(False) # Disable save until trained
-                self.start_button.setEnabled(True) # Enable training
+        # --- Check if model needs re-initialization based on NEW DATA --- #
+        # This logic mirrors start_training's checks
+        reinitialize_model = False
+        target_layer_dims = None
+        try:
+            if self.X_train is None: raise ValueError("Training data not available")
+            input_size = self.X_train.shape[0]
+            if self.current_num_classes <= 0: raise ValueError("Num classes unknown")
+            hidden_layers_str = self.hidden_layers_input.text().strip()
+            hidden_dims = [int(s.strip()) for s in hidden_layers_str.split(',') if s.strip()] if hidden_layers_str else []
+            target_layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
 
-            except ValueError as e:
-                self._log_message(f"ERROR: Invalid hidden layer configuration '{self.hidden_layers_input.text()}'. Please enter comma-separated positive integers. {e}")
-                self.model_params = None
-                self.model_layer_dims = None
-                self.start_button.setEnabled(False)
-                self.save_button.setEnabled(False)
-            # -------------------------------------- #
-        else:
-            self._log_message("ERROR: Number of classes is 0 or unknown. Cannot initialize model parameters.")
+            model_type_to_use = "SimpleNN" # Hardcoded for now
+            ModelClass = SimpleNeuralNetwork # Will be None for now
+
+            if self.current_model is None or self.model_layer_dims != target_layer_dims:
+                self._log_message(f"Model needs (re)initialization for new data/architecture {target_layer_dims}.")
+                reinitialize_model = True
+            else:
+                 self._log_message(f"Existing model architecture {self.model_layer_dims} matches data. Reusing instance.")
+
+            if reinitialize_model:
+                if ModelClass is None:
+                    self._log_message("WARN: Cannot initialize model class.")
+                    self.current_model = None
+                    self.model_params = None
+                    self.model_layer_dims = None
+                else:
+                    self.current_model = ModelClass(layer_dims=target_layer_dims)
+                    self.model_layer_dims = target_layer_dims
+                    self.current_model_type = model_type_to_use
+                    self.model_params = self.current_model.get_params() if hasattr(self.current_model, 'get_params') else None
+                    self._log_message(f"Re-initialized model instance: {self.current_model_type} {self.model_layer_dims}")
+
+        except Exception as e:
+            self._log_message(f"ERROR checking/re-initializing model after data load: {e}")
+            self.current_model = None
             self.model_params = None
             self.model_layer_dims = None
-            self.start_button.setEnabled(False)
-            self.save_button.setEnabled(False)
-        # -------------------------------------------------------------
+        # ----------------------------------------------------------------- #
 
-        # Update combo box if needed (e.g., for uploaded)
-        if self.dataset_dropdown.findText(dataset_name) == -1: # Use dataset_dropdown
-            self.dataset_dropdown.addItem(dataset_name)        # Use dataset_dropdown
-        self.dataset_dropdown.setCurrentText(dataset_name)       # Use dataset_dropdown
-        # --- Enable/disable image type based on image col input ---
+        # Enable training button only if a model instance exists
+        self.start_button.setEnabled(self.current_model is not None)
+        self.save_button.setEnabled(False) # Disable save until trained/loaded
+
+        if self.dataset_dropdown.findText(dataset_name) == -1:
+            self.dataset_dropdown.addItem(dataset_name)
+        self.dataset_dropdown.setCurrentText(dataset_name)
         self._update_image_col_type_state()
-        # --- Enable training button --- #
-        # self.start_button.setEnabled(True) # REMOVED - Enable ONLY after successful param init
 
     # --- Add slot to update image type combo enabled state ---
     def _update_image_col_type_state(self):
@@ -1258,19 +1143,19 @@ class MainWindow(QMainWindow):
             try:
                 self._log_message(f"Attempting to load parameters from: {file_path}")
                 data = np.load(file_path, allow_pickle=True)
-                loaded_params = dict(data)
+                loaded_data = dict(data)
                 self._log_message("Parameters loaded successfully.")
 
                 # --- Infer Layer Dimensions from Loaded Parameters --- #
                 inferred_layer_dims = None
                 try:
-                    num_layers = len(loaded_params) // 2
-                    if num_layers > 0 and 'W1' in loaded_params:
-                        dims = [loaded_params['W1'].shape[1]] # Input size
+                    num_layers = len(loaded_data) // 2
+                    if num_layers > 0 and 'W1' in loaded_data:
+                        dims = [loaded_data['W1'].shape[1]] # Input size
                         for l in range(1, num_layers + 1):
                             key_W = f'W{l}'
-                            if key_W in loaded_params:
-                                dims.append(loaded_params[key_W].shape[0]) # Output size of layer l
+                            if key_W in loaded_data:
+                                dims.append(loaded_data[key_W].shape[0]) # Output size of layer l
                             else:
                                 raise KeyError(f"Missing weight key {key_W}")
                         inferred_layer_dims = dims
@@ -1282,15 +1167,13 @@ class MainWindow(QMainWindow):
                 # -------------------------------------------------- #
 
                 # Store loaded parameters and inferred dimensions
-                self.model_params = loaded_params
+                self.model_params = loaded_data
                 self.model_layer_dims = inferred_layer_dims
 
                 # Reset training history as it doesn't correspond to loaded parameters
                 self.train_loss_history = []
                 self.val_accuracy_history = []
-                self.accuracy_label.setText("Final Validation Accuracy: --") # Reset accuracy label
-
-                # Update UI based on loaded parameters
+                self.accuracy_label.setText("Final Validation Accuracy: --")
                 if self.current_dataset is not None:
                     self.start_button.setEnabled(True)
                 self.save_button.setEnabled(True) # Enable save button after loading
@@ -1307,11 +1190,7 @@ class MainWindow(QMainWindow):
     # --- New Slot for Predicting Drawing ---
     def _predict_drawing(self):
         self._log_message("--- Starting Prediction from Drawing ---")
-        # Clear previous file prediction display if any
-        # self.image_preview_label.clear() # Keep previous drawing preview?
-        self.probability_graph.clear_graph() # Clear graph
-
-        # Get the drawing data
+        self.probability_graph.clear_graph()
         img_array = self.drawing_canvas.getDrawingArray()
         preview_pixmap = self.drawing_canvas.getPreviewPixmap()
 
@@ -1322,55 +1201,38 @@ class MainWindow(QMainWindow):
             return
 
         if preview_pixmap:
-            # Scale pixmap to fit the label while keeping aspect ratio
-            scaled_pixmap = preview_pixmap.scaled(self.image_preview_label.size(),
-                                                 Qt.KeepAspectRatio,
-                                                 Qt.SmoothTransformation)
+            scaled_pixmap = preview_pixmap.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.image_preview_label.setPixmap(scaled_pixmap)
         else:
             self.image_preview_label.setText("Preview Error")
 
-        # Run prediction
         try:
-            self._log_message("Running forward propagation on drawing...")
-            # Check if model_params dictionary exists and is not empty
-            if not hasattr(self, 'model_params') or not self.model_params:
-                 self._log_message("ERROR: Model parameters not loaded. Load weights first.")
-                 self.image_preview_label.setText("Load weights first.")
-                 self.probability_graph.clear_graph()
-                 return
-
-            # Perform prediction using the parameters dictionary
-            AL, _, status = neural_net.forward_prop(img_array, self.model_params)
-            if not status:
-                self._log_message("ERROR: Forward propagation failed for drawing prediction.")
-                self.probability_graph.clear_graph()
+            self._log_message("Running model prediction on drawing...")
+            if self.current_model is None or not hasattr(self.current_model, 'predict'):
+                self._log_message("ERROR: Model not loaded/trained or has no predict method.")
+                self.image_preview_label.setText("Model not ready.")
                 return
 
-            prediction = np.argmax(AL)
-            probabilities = AL.flatten()
+            probabilities = self.current_model.predict(img_array)
+            if probabilities is None:
+                self._log_message("ERROR: Model prediction failed.")
+                return
 
-            # --- Get Class Name --- #
-            predicted_name = str(prediction) # Default to index string
-            display_names = None # Default to no specific names for graph
+            prediction = np.argmax(probabilities)
+            probabilities = probabilities.flatten()
+
+            predicted_name = str(prediction)
+            display_names = None
             if self.class_names and prediction < len(self.class_names):
                 predicted_name = self.class_names[prediction]
-                display_names = self.class_names # Use names for graph labels
+                display_names = self.class_names
                 self._log_message(f"Prediction Result: Index={prediction}, Name='{predicted_name}'")
             else:
-                self._log_message(f"Prediction Result: Index={prediction} (No class name mapping found or index out of range)")
-            # -------------------- #
-
-            # Update probability bar graph with probabilities and class names (if available)
+                self._log_message(f"Prediction Result: Index={prediction} (No class name mapping)")
             self.probability_graph.set_probabilities(probabilities, predicted_name, display_names)
 
         except Exception as e:
             self._log_message(f"ERROR during prediction: {e}")
-            # --- Add detailed exception info ---
-            import traceback
-            self._log_message(f"Exception Type: {type(e)}")
-            self._log_message(f"Traceback:\n{traceback.format_exc()}")
-            # ------------------------------------
             self.image_preview_label.setText("Error predicting.")
             self.probability_graph.clear_graph()
 
