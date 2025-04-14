@@ -575,6 +575,8 @@ def load_emoji_dataset(csv_path: str,
         all_X_data: List[np.ndarray] = []
         all_Y_names: List[str] = [] # Store names corresponding to processed images
         processed_indices: List[int] = [] # Keep track of successfully processed rows
+        save_counter = 0 # Counter for saving debug images
+        max_save = 5       # Max number of debug images to save
 
         for index, row in df_filtered.iterrows():
             base64_str = row[image_column]
@@ -584,6 +586,23 @@ def load_emoji_dataset(csv_path: str,
                 all_X_data.append(img_vector)
                 all_Y_names.append(name)
                 processed_indices.append(index)
+
+                # --- Debug: Save processed image --- #
+                if save_counter < max_save:
+                    try:
+                        # Reshape vector (784,) to (28, 28) and scale back to 0-255
+                        img_array = (img_vector.reshape(28, 28) * 255).astype(np.uint8)
+                        pil_img = Image.fromarray(img_array, mode='L') # 'L' for grayscale
+                        # Sanitize name for filename
+                        safe_name = "".join([c if c.isalnum() else "_" for c in name])
+                        debug_filename = f"debug_processed_b64_sample_{save_counter}_{safe_name}.png"
+                        pil_img.save(debug_filename)
+                        print(f"  DEBUG: Saved processed image sample to {debug_filename}", file=sys.stderr)
+                        save_counter += 1
+                    except Exception as save_err:
+                        print(f"  DEBUG: Error saving debug image: {save_err}", file=sys.stderr)
+                # --------------------------------- #
+
             else:
                  print(f"  Warning: Skipping emoji '{name}' (row index {index}) - failed to process image.", file=sys.stderr)
 
