@@ -7,6 +7,7 @@ import base64
 from io import BytesIO
 from PIL import Image # Requires Pillow
 from typing import Tuple, Optional, Union, Dict, List, Any
+import pickle # Needed for CIFAR-10
 
 # Import the new utility functions
 from utils.image_processor import process_image_from_base64, process_image_from_path
@@ -637,6 +638,95 @@ def load_emoji_dataset(csv_path: str,
         print(f"Error loading or processing emoji dataset {csv_path}: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return None, None, None, None, 0, None
+
+# --- CIFAR-10 Loader --- #
+
+def load_cifar10_dataset(data_dir: str) -> LoadResult:
+    """Loads the CIFAR-10 dataset from the pickled batch files.
+
+    Assumes the data is located in a subdirectory (e.g., 'cifar-10-batches-py')
+    within the specified data_dir.
+    Combines batches 1-5 for training, uses test_batch for validation.
+    Normalizes pixel data to 0-1 and reshapes to (3072, num_samples).
+
+    Args:
+        data_dir (str): The directory containing the 'cifar-10-batches-py' folder.
+
+    Returns:
+        LoadResult: (X_train, Y_train, X_dev, Y_dev, 10) or (None,)*4 + (0,) on failure.
+    """
+    cifar10_dir = os.path.join(data_dir, 'cifar-10-batches-py')
+    num_classes = 10
+
+    if not os.path.isdir(cifar10_dir):
+        print(f"Error: CIFAR-10 directory not found at '{cifar10_dir}'", file=sys.stderr)
+        print("  Please download CIFAR-10 (Python version) and place it in the 'data' folder.", file=sys.stderr)
+        return None, None, None, None, 0
+
+    def unpickle(file):
+        """Helper function to unpickle a CIFAR-10 batch file."""
+        try:
+            with open(file, 'rb') as fo:
+                dict = pickle.load(fo, encoding='bytes')
+            return dict
+        except Exception as e:
+            print(f"Error unpickling file {file}: {e}", file=sys.stderr)
+            return None
+
+    # Load training data (batches 1-5)
+    X_train_list = []
+    Y_train_list = []
+    print("Loading CIFAR-10 training batches...", file=sys.stderr)
+    for i in range(1, 6):
+        batch_file = os.path.join(cifar10_dir, f'data_batch_{i}')
+        batch_dict = unpickle(batch_file)
+        if batch_dict is None:
+            return None, None, None, None, 0 # Error loading batch
+
+        # Data is typically (10000, 3072) uint8, Labels are list of 10000 ints
+        X_train_list.append(batch_dict[b'data'])
+        Y_train_list.extend(batch_dict[b'labels'])
+
+    if not X_train_list:
+         print("Error: No training batches loaded successfully.", file=sys.stderr)
+         return None, None, None, None, 0
+
+    # Combine batches and normalize
+    X_train_all = np.concatenate(X_train_list, axis=0)
+    Y_train_all = np.array(Y_train_list, dtype=int)
+    # Normalize and transpose features: (3072, num_samples)
+    X_train = (X_train_all.astype(float) / 255.0).T
+    print(f"  CIFAR-10 Train Combined: X={X_train.shape}, Y={Y_train_all.shape}", file=sys.stderr)
+
+    # Load test data (used as validation set here)
+    print("Loading CIFAR-10 test batch (for validation)...", file=sys.stderr)
+    test_batch_file = os.path.join(cifar10_dir, 'test_batch')
+    test_dict = unpickle(test_batch_file)
+    if test_dict is None:
+        return None, None, None, None, 0 # Error loading test batch
+
+    X_dev_raw = test_dict[b'data']
+    Y_dev = np.array(test_dict[b'labels'], dtype=int)
+    # Normalize and transpose features: (3072, num_samples)
+    X_dev = (X_dev_raw.astype(float) / 255.0).T
+    print(f"  CIFAR-10 Dev (Test Batch): X={X_dev.shape}, Y={Y_dev.shape}", file=sys.stderr)
+
+    # --- Optional: Load class names --- #
+    meta_file = os.path.join(cifar10_dir, 'batches.meta')
+    meta_dict = unpickle(meta_file)
+    class_names = []
+    if meta_dict and b'label_names' in meta_dict:
+        try:
+             class_names = [name.decode('utf-8') for name in meta_dict[b'label_names']]
+             print(f"  CIFAR-10 Class Names: {class_names}", file=sys.stderr)
+        except Exception as e:
+             print(f"Warn: Could not decode CIFAR-10 class names: {e}", file=sys.stderr)
+    # ---------------------------------- #
+
+    # For CIFAR-10, we don't need _reshape_and_split_data as batches are pre-split
+    return X_train, Y_train_all, X_dev, Y_dev, num_classes
+
+# --- End CIFAR-10 Loader --- #
 
 # Example usage:
 # if __name__ == "__main__":
