@@ -35,15 +35,19 @@ def init_params(layer_dims: List[int]) -> Dict[str, np.ndarray]:
     np.random.seed(1) # For consistency
     parameters: Dict[str, np.ndarray] = {}
     L = len(layer_dims) # Number of layers including input
+    print(f"  DEBUG [init_params]: Received layer_dims: {layer_dims}, Calculated L={L}", file=sys.stderr)
 
     for l in range(1, L):
-        # Xavier/He initialization for weights
+        print(f"  DEBUG [init_params]: Inside loop, l = {l}", file=sys.stderr)
         parameters[f'W{l}'] = np.random.randn(layer_dims[l], layer_dims[l-1]) * np.sqrt(2. / layer_dims[l-1])
         parameters[f'b{l}'] = np.zeros((layer_dims[l], 1))
 
         assert(parameters[f'W{l}'].shape == (layer_dims[l], layer_dims[l-1]))
         assert(parameters[f'b{l}'].shape == (layer_dims[l], 1))
 
+    # --- Debug: Log created parameter keys --- #
+    print(f"  DEBUG [init_params]: Created parameter keys: {list(parameters.keys())}", file=sys.stderr)
+    # --------------------------------------- #
     return parameters
 
 # --- Forward Propagation ---
@@ -86,10 +90,14 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> Tuple[np.n
     caches: List[Tuple[Any, Any]] = []
     A = X
     L = len(parameters) // 2 # Number of layers with parameters
+    print(f"  DEBUG [forward_prop]: Number of layers (L) = {L}", file=sys.stderr)
+    loop_counter = 0 # Debug counter
 
     try:
         # Implement [LINEAR -> RELU] L-1 times
         for l in range(1, L):
+            loop_counter += 1 # Increment counter
+            print(f"  DEBUG [forward_prop]: In RELU loop, l = {l}", file=sys.stderr)
             A_prev = A
             Wl = parameters[f'W{l}']
             bl = parameters[f'b{l}']
@@ -102,6 +110,7 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> Tuple[np.n
         # Implement LINEAR -> SOFTMAX for the last layer
         WL = parameters[f'W{L}']
         bL = parameters[f'b{L}']
+        print(f"  DEBUG [forward_prop]: Executing final Softmax step for layer {L}", file=sys.stderr)
         AL, cache = activation_forward(A, WL, bL, activation="softmax")
         caches.append(cache)
         if np.isnan(AL).any() or np.isinf(AL).any():
@@ -109,6 +118,8 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> Tuple[np.n
             return AL, caches, False # Indicate failure
 
         assert(AL.shape[1] == X.shape[1])
+        print(f"  DEBUG [forward_prop]: RELU loop ran {loop_counter} times.", file=sys.stderr)
+        print(f"  DEBUG [forward_prop]: Final length of caches = {len(caches)}", file=sys.stderr)
         return AL, caches, True # Indicate success
 
     except Exception as e:
@@ -124,12 +135,30 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> Tuple[np.n
 def one_hot(Y: np.ndarray, num_classes: int) -> np.ndarray:
     """Converts an array of integer labels to one-hot encoding."""
     m = Y.size
+    # Ensure Y is 1D integer array
+    Y_flat = Y.flatten().astype(int)
+    # Debug: Print input shape and range
+    print(f"  DEBUG [one_hot]: Input Y shape: {Y.shape}, flattened size: {m}, num_classes: {num_classes}", file=sys.stderr)
+    if m > 0:
+        print(f"  DEBUG [one_hot]: Y min: {np.min(Y_flat)}, Y max: {np.max(Y_flat)}", file=sys.stderr)
+
     one_hot_Y = np.zeros((num_classes, m))
     # Handle potential out-of-bounds labels gracefully
-    valid_indices = (Y >= 0) & (Y < num_classes)
-    one_hot_Y[Y[valid_indices], np.arange(m)[valid_indices]] = 1
-    if not np.all(valid_indices):
-        print(f"Warning: Some labels were outside the expected range [0, {num_classes-1}].", file=sys.stderr)
+    valid_indices_mask = (Y_flat >= 0) & (Y_flat < num_classes)
+    valid_labels = Y_flat[valid_indices_mask]
+    valid_positions = np.arange(m)[valid_indices_mask]
+
+    # Apply one-hot encoding only for valid labels/positions
+    if valid_labels.size > 0:
+        one_hot_Y[valid_labels, valid_positions] = 1
+
+    # Log if any labels were out of bounds
+    num_invalid = m - valid_labels.size
+    if num_invalid > 0:
+        print(f"  Warning [one_hot]: {num_invalid}/{m} labels were outside the expected range [0, {num_classes-1}].", file=sys.stderr)
+    
+    # Debug: Print output shape and sum (should be m)
+    print(f"  DEBUG [one_hot]: Output one_hot_Y shape: {one_hot_Y.shape}, Sum: {np.sum(one_hot_Y)}", file=sys.stderr)
     return one_hot_Y
 
 def linear_backward(dZ: np.ndarray, linear_cache: Tuple[np.ndarray, np.ndarray, np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -191,17 +220,41 @@ def backward_prop(AL: np.ndarray, Y: np.ndarray, caches: List[Tuple[Any, Any]]) 
     # Gradients for the last layer (LINEAR part of Softmax layer)
     current_cache = caches[L-1]
     linear_cache_L, _ = current_cache # Softmax activation cache (Z) not used directly here
+    # The derivative dZL was calculated above (AL - Y_one_hot)
+    # We compute dA_prev, dW, db for the *linear* part of the final layer
     grads[f"dA{L-1}"], grads[f"dW{L}"], grads[f"db{L}"] = linear_backward(dZL, linear_cache_L)
 
-    # --- Loop from l=L-2 to l=0 --- 
+    # --- Debug: Log Last Layer Gradients --- #
+    if f"dW{L}" in grads and f"db{L}" in grads:
+        dW_L_norm = np.linalg.norm(grads[f"dW{L}"])
+        db_L_norm = np.linalg.norm(grads[f"db{L}"])
+        print(f"  DEBUG [backward_prop]: Last Layer (L={L}) | dW norm: {dW_L_norm:.4e}, db norm: {db_L_norm:.4e}", file=sys.stderr)
+    # -------------------------------------- #
+
+    # --- Loop from l=L-2 down to 0 --- 
+    # Iterate through the RELU layers backwards
     for l in reversed(range(L - 1)):
         # Gradients for layer l: LINEAR -> RELU
+        # Layer indices are l=0, 1, ..., L-2 for these layers
+        # Cache indices match: caches[0], caches[1], ..., caches[L-2]
+        # Gradients dA{l+1}, dW{l+1}, db{l+1} were computed in the previous step
+        # (or dA{L-1}, dW{L}, db{L} for the first iteration of this loop)
         current_cache = caches[l]
-        # Pass dA from the previous layer (l+1)
-        dA_prev_temp, dW_temp, db_temp = activation_backward(grads[f"dA{l + 1}"], current_cache, activation="relu")
+        dA_input = grads[f"dA{l + 1}"] # Get dA from the *next* layer (closer to output)
+        
+        dA_prev_temp, dW_temp, db_temp = activation_backward(dA_input, current_cache, activation="relu")
+        
+        # Store gradients for the current layer l (parameters W{l+1}, b{l+1})
         grads[f"dA{l}"] = dA_prev_temp
         grads[f"dW{l + 1}"] = dW_temp
         grads[f"db{l + 1}"] = db_temp
+
+    # --- Debug: Log First Hidden Layer Gradients (if exists) --- #
+    if L > 1 and "dW1" in grads and "db1" in grads:
+        dW1_norm = np.linalg.norm(grads["dW1"])
+        db1_norm = np.linalg.norm(grads["db1"])
+        print(f"  DEBUG [backward_prop]: First Layer (L=1) | dW norm: {dW1_norm:.4e}, db norm: {db1_norm:.4e}", file=sys.stderr)
+    # ------------------------------------------------------ #
 
     # Clean up intermediate dA gradients (only need dW and db)
     grads = {key: val for key, val in grads.items() if not key.startswith('dA')}
@@ -244,8 +297,29 @@ def get_accuracy(predictions: np.ndarray, Y: np.ndarray) -> float:
          print(f"Warning: Label count ({Y.size}) != Prediction count ({predictions.size}) in get_accuracy.", file=sys.stderr)
          return 0.0 # Or handle error as appropriate
     if Y.size == 0:
+        print(f"  DEBUG [get_accuracy]: Attempted accuracy calculation with zero samples.", file=sys.stderr)
         return 0.0 # Avoid division by zero
-    return np.sum(predictions == Y) / Y.size
+        
+    # --- Debugging --- 
+    print(f"  DEBUG [get_accuracy]: Pred shape: {predictions.shape}, Y shape: {Y.shape}", file=sys.stderr)
+    if Y.size > 0:
+        # Use try-except for min/max in case predictions array is somehow empty despite size check
+        try:
+            pred_min, pred_max = (np.min(predictions), np.max(predictions)) if predictions.size > 0 else (-1, -1)
+            y_min, y_max = (np.min(Y), np.max(Y)) if Y.size > 0 else (-1, -1)
+            pred_unique_count = len(np.unique(predictions)) if predictions.size > 0 else 0
+            y_unique_count = len(np.unique(Y)) if Y.size > 0 else 0
+            print(f"  DEBUG [get_accuracy]: Pred unique count: {pred_unique_count}, Y unique count: {y_unique_count}", file=sys.stderr)
+            print(f"  DEBUG [get_accuracy]: Pred min: {pred_min}, Pred max: {pred_max}", file=sys.stderr)
+            print(f"  DEBUG [get_accuracy]: Y min: {y_min}, Y max: {y_max}", file=sys.stderr)
+        except Exception as e_stat:
+            print(f"  DEBUG [get_accuracy]: Error getting stats: {e_stat}", file=sys.stderr)
+    # -----------------
+    
+    correct_count = np.sum(predictions == Y)
+    accuracy = correct_count / Y.size
+    print(f"  DEBUG [get_accuracy]: Correct: {correct_count}, Total: {Y.size}, Accuracy: {accuracy:.4f}", file=sys.stderr)
+    return accuracy
 
 def compute_loss(A2: np.ndarray, Y: np.ndarray) -> float:
     """Computes the cross-entropy loss.
@@ -255,14 +329,34 @@ def compute_loss(A2: np.ndarray, Y: np.ndarray) -> float:
     """
     m: int = Y.size
     num_classes: int = A2.shape[0] # Get num_classes from network output shape
-    one_hot_Y: np.ndarray = one_hot(Y.flatten(), num_classes) # Ensure Y is 1D
+    print(f"  DEBUG [compute_loss]: Input A2 shape: {A2.shape}, Y shape: {Y.shape}, m={m}, num_classes={num_classes}", file=sys.stderr)
+    
+    # Get one-hot encoded Y (with internal debugging)
+    one_hot_Y: np.ndarray = one_hot(Y, num_classes) # Y is passed directly
+    
     # Add epsilon to avoid log(0)
     eps: float = 1e-10
     # Ensure shapes match before calculation
     if one_hot_Y.shape[0] != A2.shape[0] or one_hot_Y.shape[1] != A2.shape[1]:
-        print(f"ERROR: Shape mismatch in compute_loss! one_hot_Y: {one_hot_Y.shape}, A2: {A2.shape}", file=sys.stderr)
-        return np.nan
-    loss: float = -1 / m * np.sum(one_hot_Y * np.log(A2 + eps))
+        print(f"ERROR [compute_loss]: Shape mismatch! one_hot_Y: {one_hot_Y.shape}, A2: {A2.shape}", file=sys.stderr)
+        return np.nan # Return NaN on shape mismatch
+        
+    # Calculate loss
+    loss_array = one_hot_Y * np.log(A2 + eps)
+    loss: float = -1 / m * np.sum(loss_array)
+    
+    # Debug: Print loss value
+    print(f"  DEBUG [compute_loss]: Calculated loss: {loss}", file=sys.stderr)
+    
+    # Check for NaN/Inf in loss
+    if np.isnan(loss) or np.isinf(loss):
+        print(f"ERROR [compute_loss]: Loss is NaN or Inf!", file=sys.stderr)
+        # Optional: Print parts of the calculation for deeper debugging
+        # print(f"  DEBUG [compute_loss]: Sample A2: {A2[:, 0]}", file=sys.stderr)
+        # print(f"  DEBUG [compute_loss]: Sample one_hot_Y: {one_hot_Y[:, 0]}", file=sys.stderr)
+        # print(f"  DEBUG [compute_loss]: Sample log(A2+eps): {np.log(A2[:, 0] + eps)}", file=sys.stderr)
+        # print(f"  DEBUG [compute_loss]: Sample loss_array: {loss_array[:, 0]}", file=sys.stderr)
+
     return loss
 
 # --- Gradient Descent Loop ---
@@ -290,6 +384,10 @@ def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray
         tuple: (parameters, train_loss_history, val_accuracy_history)
                Final parameters and lists of training loss and validation accuracy.
     """
+    # --- Debug: Check received parameters --- #
+    print(f"  DEBUG [gradient_descent]: Received parameters keys: {list(parameters.keys())}", file=sys.stderr)
+    # --------------------------------------- #
+    
     global stop_training_flag
     stop_training_flag = False # Reset flag at start
 

@@ -706,33 +706,73 @@ class MainWindow(QMainWindow):
         self._log_message(f"Hyperparameters: Epochs={epochs}, Learning Rate={learning_rate}, Patience={patience}")
         self.progress_bar.setMaximum(epochs)
 
-        # --- Threading Setup --- 
-        self.training_thread = QThread() # Create a new thread
-        # Create worker instance with necessary data
-        if self.model_params is None:
-            self._log_message("ERROR: Model parameters are not initialized. Cannot start training.")
-            self.start_button.setEnabled(True) # Re-enable train button
+        # --- Re-initialize Model Parameters Based on Current UI Input --- #
+        try:
+            hidden_layers_str = self.hidden_layers_input.text().strip()
+            # --- Debug: Log the raw input string --- #
+            self._log_message(f"DEBUG [start_training]: Read hidden_layers_input text: '{hidden_layers_str}'")
+            # ---------------------------------------- #
+            if hidden_layers_str:
+                hidden_dims = [int(s.strip()) for s in hidden_layers_str.split(',') if s.strip()]
+                if not all(dim > 0 for dim in hidden_dims):
+                    raise ValueError("Hidden layer dimensions must be positive integers.")
+            else:
+                hidden_dims = [] # No hidden layers
+
+            input_size = 784 # Assuming 28x28 input
+            if self.current_num_classes <= 0:
+                self._log_message("ERROR: Number of classes not determined. Cannot initialize model for training.")
+                self.start_button.setEnabled(True)
+                self.stop_button.setEnabled(False)
+                self.progress_bar.setVisible(False)
+                return
+            
+            layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
+            self._log_message(f"Initializing model for training with layers: {layer_dims}")
+            self.model_params = neural_net.init_params(layer_dims)
+            self.save_button.setEnabled(False) # Disable save until trained again
+
+        except ValueError as e:
+            self._log_message(f"ERROR: Invalid hidden layer configuration '{self.hidden_layers_input.text()}'. Please enter comma-separated positive integers. {e}")
+            self.start_button.setEnabled(True) # Re-enable train button on error
+            self.stop_button.setEnabled(False)
+            self.progress_bar.setVisible(False)
+            return # Stop if config is invalid
+        except Exception as e:
+            self._log_message(f"ERROR: Unexpected error initializing model parameters: {e}")
+            self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.progress_bar.setVisible(False)
             return
-        if self.current_num_classes <= 0:
-             self._log_message("ERROR: Number of classes not determined. Cannot start training.")
-             self.start_button.setEnabled(True) # Re-enable train button
-             self.stop_button.setEnabled(False)
-             self.progress_bar.setVisible(False)
-             return
+        # ------------------------------------------------------------- #
 
-        # --- UNPACKING REMOVED - model_params is now a dictionary --- 
-        # W1_init, b1_init, W2_init, b2_init = self.model_params 
+        # --- Log Layer Configuration Before Training --- #
+        # (This block becomes somewhat redundant now, but can stay as a final check)
+        try:
+            if self.model_params:
+                # Re-derive dims from the newly initialized params to confirm
+                check_layer_dims = [self.model_params['W1'].shape[1]]
+                num_layers = len(self.model_params) // 2
+                for i in range(1, num_layers + 1):
+                    check_layer_dims.append(self.model_params[f'W{i}'].shape[0])
+                self._log_message(f"Confirmed layer configuration for training: {check_layer_dims}")
+            else:
+                self._log_message("WARN: Cannot log layer config - model parameters not found after initialization attempt.")
+        except KeyError as e:
+             self._log_message(f"WARN: Could not determine layer configuration from model parameters. Missing key: {e}")
+        except Exception as e:
+            self._log_message(f"WARN: An error occurred while determining layer configuration: {e}")
+        # --------------------------------------------
 
+        # --- Threading Setup ---
+        self.training_thread = QThread() # Create a new thread
+        # Create worker instance with necessary data
         self.training_worker = TrainingWorker(
             self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-            # W1_init, b1_init, W2_init, b2_init, # Pass initial weights/biases
-            self.model_params, # Pass the entire parameters dictionary
-            epochs,         # Pass epochs
-            learning_rate,  # Pass learning rate as alpha
-            # self.current_num_classes, # No longer needed for worker init
-            patience        # Pass patience value
+            self.model_params,
+            epochs,
+            learning_rate,
+            patience
         )
         # Move worker to the thread
         self.training_worker.moveToThread(self.training_thread)
