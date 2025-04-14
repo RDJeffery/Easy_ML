@@ -270,6 +270,14 @@ class MainWindow(QMainWindow):
         self.patience_input.setToolTip("Epochs to wait for improvement before stopping early (0=disabled)")
         hyper_layout.addWidget(self.patience_input)
 
+        # --- Add Activation Function Selection --- #
+        activation_label = QLabel("Activation:")
+        hyper_layout.addWidget(activation_label)
+        self.activation_combo = QComboBox()
+        self.activation_combo.addItems(["ReLU", "Sigmoid", "Tanh"]) # Add options
+        self.activation_combo.setToolTip("Activation function for the hidden layers (ReLU is generally recommended)")
+        hyper_layout.addWidget(self.activation_combo)
+        # ----------------------------------------- #
 
         hyper_layout.addStretch() # Pushes hyperparameter widgets to the left
         layout.addLayout(hyper_layout) # Add the hyperparameter layout to the main vertical layout
@@ -703,7 +711,8 @@ class MainWindow(QMainWindow):
         epochs = self.epochs_input.value()
         learning_rate = self.learning_rate_input.value()
         patience = self.patience_input.value()
-        self._log_message(f"Hyperparameters: Epochs={epochs}, Learning Rate={learning_rate}, Patience={patience}")
+        activation_function = self.activation_combo.currentText()
+        self._log_message(f"Hyperparameters: Epochs={epochs}, Learning Rate={learning_rate}, Patience={patience}, Activation={activation_function}")
         self.progress_bar.setMaximum(epochs)
 
         # --- Re-initialize Model Parameters Based on Current UI Input --- #
@@ -737,7 +746,7 @@ class MainWindow(QMainWindow):
             self.start_button.setEnabled(True) # Re-enable train button on error
             self.stop_button.setEnabled(False)
             self.progress_bar.setVisible(False)
-            return # Stop if config is invalid
+            return
         except Exception as e:
             self._log_message(f"ERROR: Unexpected error initializing model parameters: {e}")
             self.start_button.setEnabled(True)
@@ -772,7 +781,8 @@ class MainWindow(QMainWindow):
             self.model_params,
             epochs,
             learning_rate,
-            patience
+            patience,
+            activation_function # Pass the retrieved activation function
         )
         # Move worker to the thread
         self.training_worker.moveToThread(self.training_thread)
