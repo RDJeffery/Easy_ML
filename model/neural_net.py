@@ -12,11 +12,34 @@ def deriv_ReLU(Z: np.ndarray) -> np.ndarray:
     """Derivative of ReLU."""
     return Z > 0
 
+def Sigmoid(Z: np.ndarray) -> np.ndarray:
+    """Sigmoid activation."""
+    # Add clipping for numerical stability
+    Z_clipped = np.clip(Z, -500, 500)
+    return 1 / (1 + np.exp(-Z_clipped))
+
+def deriv_Sigmoid(A: np.ndarray) -> np.ndarray: # Takes activation A, not Z
+    """Derivative of Sigmoid w.r.t. Z, expressed using A."""
+    # A = Sigmoid(Z)
+    return A * (1 - A)
+
+def Tanh(Z: np.ndarray) -> np.ndarray:
+    """Hyperbolic Tangent activation."""
+    return np.tanh(Z)
+
+def deriv_Tanh(A: np.ndarray) -> np.ndarray: # Takes activation A, not Z
+    """Derivative of Tanh w.r.t. Z, expressed using A."""
+    # A = Tanh(Z)
+    return 1 - np.power(A, 2)
+
 def softmax(Z: np.ndarray) -> np.ndarray:
     """Softmax activation for the output layer."""
     # Shift Z by subtracting max for numerical stability
     shift_Z = Z - np.max(Z, axis=0, keepdims=True)
     A = np.exp(shift_Z) / np.sum(np.exp(shift_Z), axis=0, keepdims=True)
+    # Add a small epsilon to prevent log(0) in loss calculation, clip values
+    epsilon = 1e-10
+    A = np.clip(A, epsilon, 1. - epsilon)
     return A
 
 # --- Parameter Initialization ---
@@ -39,6 +62,8 @@ def init_params(layer_dims: List[int]) -> Dict[str, np.ndarray]:
 
     for l in range(1, L):
         print(f"  DEBUG [init_params]: Inside loop, l = {l}", file=sys.stderr)
+        # Use He initialization for ReLU, Xavier/Glorot for Tanh/Sigmoid might be better if chosen
+        # For simplicity, using He for all now, could adapt later.
         parameters[f'W{l}'] = np.random.randn(layer_dims[l], layer_dims[l-1]) * np.sqrt(2. / layer_dims[l-1])
         parameters[f'b{l}'] = np.zeros((layer_dims[l], 1))
 
@@ -62,24 +87,33 @@ def linear_forward(A_prev: np.ndarray, W: np.ndarray, b: np.ndarray) -> Tuple[np
 def activation_forward(A_prev: np.ndarray, W: np.ndarray, b: np.ndarray, activation: str) -> Tuple[np.ndarray, Tuple[Any, np.ndarray]]:
     """Implements forward propagation for one layer (LINEAR -> ACTIVATION)."""
     Z, linear_cache = linear_forward(A_prev, W, b)
+    activation_cache = Z # Cache Z needed for backprop
 
-    if activation == "relu":
+    if activation.lower() == "relu":
         A = ReLU(Z)
-    elif activation == "softmax":
+    elif activation.lower() == "sigmoid":
+        A = Sigmoid(Z)
+        activation_cache = A # Sigmoid derivative uses A
+    elif activation.lower() == "tanh":
+        A = Tanh(Z)
+        activation_cache = A # Tanh derivative uses A
+    elif activation.lower() == "softmax":
         A = softmax(Z)
+        # Softmax backprop calculation is simpler combined with cross-entropy loss,
+        # so we still cache Z here, but backprop uses (A - Y) directly as dZ.
     else:
-        raise ValueError(f"Unknown activation: {activation}")
+        raise ValueError(f"Unknown activation function: {activation}")
 
-    activation_cache = Z # Cache Z for ReLU derivative or softmax backprop
-    cache = (linear_cache, activation_cache)
+    cache = (linear_cache, activation_cache) # linear_cache = (A_prev, W, b), activation_cache = Z or A
     return A, cache
 
-def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> Tuple[np.ndarray, List[Tuple[Any, Any]], bool]:
-    """Implements forward propagation for the [LINEAR->RELU]*(L-1)->LINEAR->SOFTMAX model.
+def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray], hidden_activation: str = "relu") -> Tuple[np.ndarray, List[Tuple[Any, Any]], bool]:
+    """Implements forward propagation for the [LINEAR->ACTIVATION]*(L-1)->LINEAR->SOFTMAX model.
 
     Args:
         X (np.ndarray): Input data (shape: input_size, num_examples).
         parameters (Dict[str, np.ndarray]): Output of init_params().
+        hidden_activation (str): Activation function for hidden layers ('relu', 'sigmoid', 'tanh').
 
     Returns:
         Tuple containing:
@@ -90,36 +124,32 @@ def forward_prop(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> Tuple[np.n
     caches: List[Tuple[Any, Any]] = []
     A = X
     L = len(parameters) // 2 # Number of layers with parameters
-    print(f"  DEBUG [forward_prop]: Number of layers (L) = {L}", file=sys.stderr)
-    loop_counter = 0 # Debug counter
+    print(f"  DEBUG [forward_prop]: Number of layers (L) = {L}, Hidden Activation = {hidden_activation}", file=sys.stderr)
 
     try:
-        # Implement [LINEAR -> RELU] L-1 times
+        # Implement [LINEAR -> hidden_activation] L-1 times
         for l in range(1, L):
-            loop_counter += 1 # Increment counter
-            print(f"  DEBUG [forward_prop]: In RELU loop, l = {l}", file=sys.stderr)
             A_prev = A
             Wl = parameters[f'W{l}']
             bl = parameters[f'b{l}']
-            A, cache = activation_forward(A_prev, Wl, bl, activation="relu")
+            # Use the specified hidden_activation for hidden layers
+            A, cache = activation_forward(A_prev, Wl, bl, activation=hidden_activation)
             caches.append(cache)
             if np.isnan(A).any() or np.isinf(A).any():
-                print(f"ERROR: NaN or Inf detected in activations at layer {l}.", file=sys.stderr)
+                print(f"ERROR: NaN or Inf detected in activations at layer {l} ({hidden_activation}).", file=sys.stderr)
                 return A, caches, False # Indicate failure
 
         # Implement LINEAR -> SOFTMAX for the last layer
         WL = parameters[f'W{L}']
         bL = parameters[f'b{L}']
-        print(f"  DEBUG [forward_prop]: Executing final Softmax step for layer {L}", file=sys.stderr)
+        # Output layer always uses softmax
         AL, cache = activation_forward(A, WL, bL, activation="softmax")
         caches.append(cache)
         if np.isnan(AL).any() or np.isinf(AL).any():
-            print("ERROR: NaN or Inf detected in output layer activations.", file=sys.stderr)
+            print("ERROR: NaN or Inf detected in output layer activations (softmax).", file=sys.stderr)
             return AL, caches, False # Indicate failure
 
         assert(AL.shape[1] == X.shape[1])
-        print(f"  DEBUG [forward_prop]: RELU loop ran {loop_counter} times.", file=sys.stderr)
-        print(f"  DEBUG [forward_prop]: Final length of caches = {len(caches)}", file=sys.stderr)
         return AL, caches, True # Indicate success
 
     except Exception as e:
@@ -137,11 +167,6 @@ def one_hot(Y: np.ndarray, num_classes: int) -> np.ndarray:
     m = Y.size
     # Ensure Y is 1D integer array
     Y_flat = Y.flatten().astype(int)
-    # Debug: Print input shape and range
-    print(f"  DEBUG [one_hot]: Input Y shape: {Y.shape}, flattened size: {m}, num_classes: {num_classes}", file=sys.stderr)
-    if m > 0:
-        print(f"  DEBUG [one_hot]: Y min: {np.min(Y_flat)}, Y max: {np.max(Y_flat)}", file=sys.stderr)
-
     one_hot_Y = np.zeros((num_classes, m))
     # Handle potential out-of-bounds labels gracefully
     valid_indices_mask = (Y_flat >= 0) & (Y_flat < num_classes)
@@ -156,9 +181,7 @@ def one_hot(Y: np.ndarray, num_classes: int) -> np.ndarray:
     num_invalid = m - valid_labels.size
     if num_invalid > 0:
         print(f"  Warning [one_hot]: {num_invalid}/{m} labels were outside the expected range [0, {num_classes-1}].", file=sys.stderr)
-    
-    # Debug: Print output shape and sum (should be m)
-    print(f"  DEBUG [one_hot]: Output one_hot_Y shape: {one_hot_Y.shape}, Sum: {np.sum(one_hot_Y)}", file=sys.stderr)
+
     return one_hot_Y
 
 def linear_backward(dZ: np.ndarray, linear_cache: Tuple[np.ndarray, np.ndarray, np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -178,300 +201,283 @@ def linear_backward(dZ: np.ndarray, linear_cache: Tuple[np.ndarray, np.ndarray, 
 
 def activation_backward(dA: np.ndarray, cache: Tuple[Any, Any], activation: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Implements the backward propagation for the LINEAR->ACTIVATION layer."""
-    linear_cache, activation_cache = cache
-    Z = activation_cache
+    linear_cache, activation_cache = cache # activation_cache is Z for ReLU/Softmax, A for Sigmoid/Tanh
 
-    if activation == "relu":
+    if activation.lower() == "relu":
+        Z = activation_cache
         dZ = dA * deriv_ReLU(Z) # Element-wise product
-    elif activation == "softmax":
-        # This is slightly simplified for cross-entropy loss.
-        # The dZ for softmax+cross-entropy is simply A - Y_one_hot
+    elif activation.lower() == "sigmoid":
+        A = activation_cache
+        dZ = dA * deriv_Sigmoid(A) # Derivative calculated using A
+    elif activation.lower() == "tanh":
+        A = activation_cache
+        dZ = dA * deriv_Tanh(A) # Derivative calculated using A
+    elif activation.lower() == "softmax":
+        # The dZ for softmax+cross-entropy is simply AL - Y_one_hot.
         # This calculation happens *before* calling activation_backward for the last layer.
-        dZ = dA # In this case, dA passed in *is* (A - Y_one_hot)
+        dZ = dA # In this case, dA passed in *is* (AL - Y_one_hot)
     else:
-        raise ValueError(f"Unknown activation: {activation}")
+        raise ValueError(f"Unknown activation function: {activation}")
 
     dA_prev, dW, db = linear_backward(dZ, linear_cache)
     return dA_prev, dW, db
 
-def backward_prop(AL: np.ndarray, Y: np.ndarray, caches: List[Tuple[Any, Any]]) -> Dict[str, np.ndarray]:
-    """Implement the backward propagation for the [LINEAR->RELU] * (L-1) -> LINEAR -> SOFTMAX model.
+def backward_prop(AL: np.ndarray, Y: np.ndarray, caches: List[Tuple[Any, Any]], hidden_activation: str = "relu") -> Dict[str, np.ndarray]:
+    """Implement the backward propagation for the [LINEAR->ACTIVATION] * (L-1) -> LINEAR -> SOFTMAX model.
 
     Args:
         AL (np.ndarray): Probability vector, output of the forward propagation.
-        Y (np.ndarray): True "label" vector.
-        caches (List): List of caches containing linear and activation caches for each layer.
+        Y (np.ndarray): True "label" vector (shape: 1, num_examples or num_examples,).
+        caches (List): List of caches from forward_prop.
+        hidden_activation (str): Activation function used in hidden layers ('relu', 'sigmoid', 'tanh').
 
     Returns:
-        Dict[str, np.ndarray]: A dictionary with the gradients with respect to each parameter.
+        Dict[str, np.ndarray]: A dictionary with the gradients.
     """
     grads: Dict[str, np.ndarray] = {}
     L = len(caches) # The number of layers
     m = AL.shape[1]
-    # Ensure Y is 1D array
-    Y = Y.reshape(1, m) if Y.ndim == 1 else Y
+    # Ensure Y is shape (1, m)
+    Y = Y.reshape(1, m)
 
-    # --- Initializing the backpropagation --- 
+    # --- Initializing the backpropagation ---
     # Calculate dZL for the output layer (Softmax + Cross-Entropy)
     num_classes = AL.shape[0]
     Y_one_hot = one_hot(Y.flatten(), num_classes) # one_hot expects 1D Y
-    dZL = AL - Y_one_hot
+    dZL = AL - Y_one_hot # Derivative of CrossEntropyLoss w.r.t Z for Softmax output
 
-    # Gradients for the last layer (LINEAR part of Softmax layer)
-    current_cache = caches[L-1]
-    linear_cache_L, _ = current_cache # Softmax activation cache (Z) not used directly here
-    # The derivative dZL was calculated above (AL - Y_one_hot)
-    # We compute dA_prev, dW, db for the *linear* part of the final layer
-    grads[f"dA{L-1}"], grads[f"dW{L}"], grads[f"db{L}"] = linear_backward(dZL, linear_cache_L)
+    # Gradients for the last layer (Layer L)
+    current_cache = caches[L-1] # Cache for the last layer (Linear + Softmax)
+    # The activation_backward for softmax expects dZL directly
+    grads[f"dA{L-1}"], grads[f"dW{L}"], grads[f"db{L}"] = activation_backward(dZL, current_cache, activation="softmax")
 
-    # --- Debug: Log Last Layer Gradients --- #
-    if f"dW{L}" in grads and f"db{L}" in grads:
-        dW_L_norm = np.linalg.norm(grads[f"dW{L}"])
-        db_L_norm = np.linalg.norm(grads[f"db{L}"])
-        print(f"  DEBUG [backward_prop]: Last Layer (L={L}) | dW norm: {dW_L_norm:.4e}, db norm: {db_L_norm:.4e}", file=sys.stderr)
-    # -------------------------------------- #
-
-    # --- Loop from l=L-2 down to 0 --- 
-    # Iterate through the RELU layers backwards
+    # --- Loop from l=L-2 down to 0 ---
+    # Iterate through the hidden layers backwards
     for l in reversed(range(L - 1)):
-        # Gradients for layer l: LINEAR -> RELU
-        # Layer indices are l=0, 1, ..., L-2 for these layers
-        # Cache indices match: caches[0], caches[1], ..., caches[L-2]
-        # Gradients dA{l+1}, dW{l+1}, db{l+1} were computed in the previous step
-        # (or dA{L-1}, dW{L}, db{L} for the first iteration of this loop)
-        current_cache = caches[l]
+        # Gradients for layer l: LINEAR -> hidden_activation
+        current_cache = caches[l] # Cache for layer l
         dA_input = grads[f"dA{l + 1}"] # Get dA from the *next* layer (closer to output)
-        
-        dA_prev_temp, dW_temp, db_temp = activation_backward(dA_input, current_cache, activation="relu")
-        
+
+        # Use the specified hidden_activation for backward step
+        dA_prev_temp, dW_temp, db_temp = activation_backward(dA_input, current_cache, activation=hidden_activation)
+
         # Store gradients for the current layer l (parameters W{l+1}, b{l+1})
         grads[f"dA{l}"] = dA_prev_temp
         grads[f"dW{l + 1}"] = dW_temp
         grads[f"db{l + 1}"] = db_temp
 
-    # --- Debug: Log First Hidden Layer Gradients (if exists) --- #
-    if L > 1 and "dW1" in grads and "db1" in grads:
-        dW1_norm = np.linalg.norm(grads["dW1"])
-        db1_norm = np.linalg.norm(grads["db1"])
-        print(f"  DEBUG [backward_prop]: First Layer (L=1) | dW norm: {dW1_norm:.4e}, db norm: {db1_norm:.4e}", file=sys.stderr)
-    # ------------------------------------------------------ #
+    # Clean up intermediate dA gradients (only need dW and db for updates)
+    grads_final = {key: val for key, val in grads.items() if not key.startswith('dA')}
+    return grads_final
 
-    # Clean up intermediate dA gradients (only need dW and db)
-    grads = {key: val for key, val in grads.items() if not key.startswith('dA')}
-    return grads
 
 # --- Parameter Update ---
 
 def update_params(parameters: Dict[str, np.ndarray], grads: Dict[str, np.ndarray], alpha: float) -> Dict[str, np.ndarray]:
-    """Updates parameters using gradient descent.
-
-    Args:
-        parameters (Dict): Dictionary containing parameters.
-        grads (Dict): Dictionary containing gradients.
-        alpha (float): Learning rate.
-
-    Returns:
-        Dict: Dictionary containing updated parameters.
-    """
-    L = len(parameters) // 2 # number of layers in the neural network
-
-    # Update rule for each parameter
+    """Updates parameters using the gradient descent update rule."""
+    L = len(parameters) // 2 # Number of layers
     for l in range(1, L + 1):
         parameters[f"W{l}"] = parameters[f"W{l}"] - alpha * grads[f"dW{l}"]
         parameters[f"b{l}"] = parameters[f"b{l}"] - alpha * grads[f"db{l}"]
-
     return parameters
 
-# --- Prediction & Evaluation ---
+# --- Prediction & Accuracy ---
 
 def get_predictions(AL: np.ndarray) -> np.ndarray:
-    """Gets the predicted class index from the output activations."""
-    return np.argmax(AL, 0)
+    """Gets the index of the max probability for each example."""
+    return np.argmax(AL, axis=0)
 
 def get_accuracy(predictions: np.ndarray, Y: np.ndarray) -> float:
-    """Calculates the accuracy between predictions and true labels."""
-    # Ensure Y is 1D for comparison
-    Y = Y.flatten()
-    predictions = predictions.flatten()
-    if Y.size != predictions.size:
-         print(f"Warning: Label count ({Y.size}) != Prediction count ({predictions.size}) in get_accuracy.", file=sys.stderr)
-         return 0.0 # Or handle error as appropriate
-    if Y.size == 0:
-        print(f"  DEBUG [get_accuracy]: Attempted accuracy calculation with zero samples.", file=sys.stderr)
-        return 0.0 # Avoid division by zero
-        
-    # --- Debugging --- 
-    print(f"  DEBUG [get_accuracy]: Pred shape: {predictions.shape}, Y shape: {Y.shape}", file=sys.stderr)
-    if Y.size > 0:
-        # Use try-except for min/max in case predictions array is somehow empty despite size check
-        try:
-            pred_min, pred_max = (np.min(predictions), np.max(predictions)) if predictions.size > 0 else (-1, -1)
-            y_min, y_max = (np.min(Y), np.max(Y)) if Y.size > 0 else (-1, -1)
-            pred_unique_count = len(np.unique(predictions)) if predictions.size > 0 else 0
-            y_unique_count = len(np.unique(Y)) if Y.size > 0 else 0
-            print(f"  DEBUG [get_accuracy]: Pred unique count: {pred_unique_count}, Y unique count: {y_unique_count}", file=sys.stderr)
-            print(f"  DEBUG [get_accuracy]: Pred min: {pred_min}, Pred max: {pred_max}", file=sys.stderr)
-            print(f"  DEBUG [get_accuracy]: Y min: {y_min}, Y max: {y_max}", file=sys.stderr)
-        except Exception as e_stat:
-            print(f"  DEBUG [get_accuracy]: Error getting stats: {e_stat}", file=sys.stderr)
-    # -----------------
-    
-    correct_count = np.sum(predictions == Y)
-    accuracy = correct_count / Y.size
-    print(f"  DEBUG [get_accuracy]: Correct: {correct_count}, Total: {Y.size}, Accuracy: {accuracy:.4f}", file=sys.stderr)
-    return accuracy
+    """Calculates the accuracy of predictions."""
+    # Ensure Y is flattened
+    Y_flat = Y.flatten()
+    predictions_flat = predictions.flatten()
+    if predictions_flat.shape != Y_flat.shape:
+         print(f"WARN [get_accuracy]: Shape mismatch - Predictions: {predictions_flat.shape}, Y: {Y_flat.shape}", file=sys.stderr)
+         return 0.0 # Or handle error appropriately
+    print(f"  DEBUG [get_accuracy]: Comparing {np.sum(predictions_flat == Y_flat)} correct out of {Y_flat.size} examples", file=sys.stderr)
+    return np.sum(predictions_flat == Y_flat) / Y_flat.size
 
-def compute_loss(A2: np.ndarray, Y: np.ndarray) -> float:
+# --- Loss Function ---
+
+def compute_loss(AL: np.ndarray, Y: np.ndarray) -> float:
     """Computes the cross-entropy loss.
 
-    Handles potential log(0) using epsilon.
-    Determines num_classes from the network output A2.
+    Args:
+        AL (np.ndarray): Probabilities from softmax output layer (num_classes, num_examples).
+        Y (np.ndarray): True labels, vector of shape (1, num_examples) or (num_examples,).
+
+    Returns:
+        float: Cross-entropy cost.
     """
-    m: int = Y.size
-    num_classes: int = A2.shape[0] # Get num_classes from network output shape
-    print(f"  DEBUG [compute_loss]: Input A2 shape: {A2.shape}, Y shape: {Y.shape}, m={m}, num_classes={num_classes}", file=sys.stderr)
-    
-    # Get one-hot encoded Y (with internal debugging)
-    one_hot_Y: np.ndarray = one_hot(Y, num_classes) # Y is passed directly
-    
-    # Add epsilon to avoid log(0)
-    eps: float = 1e-10
-    # Ensure shapes match before calculation
-    if one_hot_Y.shape[0] != A2.shape[0] or one_hot_Y.shape[1] != A2.shape[1]:
-        print(f"ERROR [compute_loss]: Shape mismatch! one_hot_Y: {one_hot_Y.shape}, A2: {A2.shape}", file=sys.stderr)
-        return np.nan # Return NaN on shape mismatch
-        
-    # Calculate loss
-    loss_array = one_hot_Y * np.log(A2 + eps)
-    loss: float = -1 / m * np.sum(loss_array)
-    
-    # Debug: Print loss value
-    print(f"  DEBUG [compute_loss]: Calculated loss: {loss}", file=sys.stderr)
-    
-    # Check for NaN/Inf in loss
-    if np.isnan(loss) or np.isinf(loss):
-        print(f"ERROR [compute_loss]: Loss is NaN or Inf!", file=sys.stderr)
-        # Optional: Print parts of the calculation for deeper debugging
-        # print(f"  DEBUG [compute_loss]: Sample A2: {A2[:, 0]}", file=sys.stderr)
-        # print(f"  DEBUG [compute_loss]: Sample one_hot_Y: {one_hot_Y[:, 0]}", file=sys.stderr)
-        # print(f"  DEBUG [compute_loss]: Sample log(A2+eps): {np.log(A2[:, 0] + eps)}", file=sys.stderr)
-        # print(f"  DEBUG [compute_loss]: Sample loss_array: {loss_array[:, 0]}", file=sys.stderr)
+    m = Y.shape[1] if Y.ndim > 1 else Y.shape[0]
+    num_classes = AL.shape[0]
 
-    return loss
+    # Ensure Y is shape (1, m)
+    Y = Y.reshape(1, m)
+    Y_flat = Y.flatten().astype(int)
 
-# --- Gradient Descent Loop ---
+    # Check if one-hot encoding is needed (if Y contains class indices)
+    if Y.shape[0] == 1 and num_classes > 1: # Assume Y needs one-hot encoding
+        Y_one_hot = one_hot(Y_flat, num_classes)
+    elif Y.shape[0] == num_classes: # Assume Y is already one-hot
+        Y_one_hot = Y
+    else:
+        raise ValueError(f"Y shape {Y.shape} is not compatible with AL shape {AL.shape} for loss calculation.")
 
-# Global flag to allow external stop request (used by TrainingWorker)
-stop_training_flag = False
+    # Cross-entropy loss: - (1/m) * sum(Y_one_hot * log(AL))
+    # Clip AL to prevent log(0) - already done in softmax, but double-check
+    epsilon = 1e-10
+    AL_clipped = np.clip(AL, epsilon, 1. - epsilon)
+    cost = - (1./m) * np.sum(Y_one_hot * np.log(AL_clipped))
+
+    # Ensure cost is a scalar float
+    cost = np.squeeze(cost)
+    if np.isnan(cost) or np.isinf(cost):
+        print(f"ERROR [compute_loss]: Loss is NaN or Inf. AL min/max: {np.min(AL)}, {np.max(AL)}", file=sys.stderr)
+        # Optionally return a large number or raise an error
+        return np.inf
+    return float(cost)
+
+
+# --- Gradient Descent ---
+stop_training_flag = False # Global flag to signal stopping
 
 def gradient_descent(X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray, Y_dev: np.ndarray,
                      alpha: float, iterations: int,
                      parameters: Dict[str, np.ndarray],
-                     progress_callback: Optional[Callable[[int, int], None]] = None,
-                     patience: int = 0) -> Tuple[Dict[str, np.ndarray], List[float], List[float]]:
-    """Performs gradient descent and returns trained parameters and history.
+                     hidden_activation: str = "relu", # Add activation function parameter
+                     progress_callback: Optional[Callable[[int, int, float, float], bool]] = None, # iter, total, loss, val_acc -> continue?
+                     patience: int = 0) -> Optional[Tuple[Dict[str, np.ndarray], List[float], List[float]]]:
+    """Optimizes parameters using gradient descent.
 
     Args:
         X_train, Y_train: Training data and labels.
-        X_dev, Y_dev: Validation data and labels.
+        X_dev, Y_dev: Development (validation) data and labels.
         alpha (float): Learning rate.
-        iterations (int): Number of training iterations.
-        parameters (Dict): Initial model parameters.
-        progress_callback (Optional): Callback for progress updates (iter, total_iters).
-        patience (int): Patience for early stopping (0 to disable).
+        iterations (int): Number of iterations (epochs).
+        parameters (Dict[str, np.ndarray]): Initialized parameters.
+        hidden_activation (str): Activation for hidden layers ('relu', 'sigmoid', 'tanh').
+        progress_callback (Optional[Callable]): Function called each iteration
+                                                with (iter_num(1-based), total_iters, train_loss, val_acc).
+                                                Should return False to stop training.
+        patience (int): Number of iterations to wait for validation accuracy improvement
+                        before stopping early (0 to disable).
 
     Returns:
-        tuple: (parameters, train_loss_history, val_accuracy_history)
-               Final parameters and lists of training loss and validation accuracy.
+        Optional[Tuple[Dict[str, np.ndarray], List[float], List[float]]]:
+            A tuple containing:
+            - final_parameters (Dict): The learned parameters.
+            - loss_history (List): List of training loss per iteration.
+            - val_accuracy_history (List): List of validation accuracy per iteration.
+            Returns None if training was stopped prematurely or an error occurred.
     """
-    # --- Debug: Check received parameters --- #
-    print(f"  DEBUG [gradient_descent]: Received parameters keys: {list(parameters.keys())}", file=sys.stderr)
-    # --------------------------------------- #
-    
     global stop_training_flag
-    stop_training_flag = False # Reset flag at start
+    print(f"--- Starting Gradient Descent (Hidden Activation: {hidden_activation}) ---", file=sys.stderr)
+    loss_history = []
+    val_accuracy_history = []
+    best_val_acc = -1.0
+    epochs_no_improve = 0
+    best_params = parameters # Store initial params as best initially
 
-    train_loss_history: List[float] = []
-    val_accuracy_history: List[float] = []
+    # --- Get Number of Classes --- #
+    L = len(parameters) // 2
+    num_classes = parameters[f'W{L}'].shape[0]
+    print(f"  DEBUG [gradient_descent]: Inferred num_classes = {num_classes}", file=sys.stderr)
+    # ----------------------------- #
 
-    # Early Stopping Variables
-    best_val_accuracy: float = -1.0
-    patience_counter: int = 0
-    log_interval: int = 10
+    # Ensure Y_dev is 1D for accuracy calculation
+    Y_dev_flat = Y_dev.flatten() if Y_dev.ndim > 1 else Y_dev
 
     for i in range(iterations):
         if stop_training_flag:
-            print("--- STOP SIGNALLED via global flag ---", file=sys.stderr)
-            break
+            print(f"INFO: Training stopped at iteration {i} by flag.", file=sys.stderr)
+            stop_training_flag = False # Reset flag
+            return None # Indicate premature stop
 
-        # Forward propagation
-        AL, caches, status = forward_prop(X_train, parameters)
-        if not status:
-            print(f"ERROR: Stopping training at iteration {i+1} due to NaN/inf in forward propagation.", file=sys.stderr)
-            break
+        # Forward propagation on training data
+        AL_train, caches, forward_status_train = forward_prop(X_train, parameters, hidden_activation=hidden_activation)
+        if not forward_status_train:
+            print(f"ERROR: Forward propagation failed on training set at iteration {i}. Stopping training.", file=sys.stderr)
+            return None
+
+        # Compute training loss
+        train_loss = compute_loss(AL_train, Y_train)
+        loss_history.append(train_loss)
+        if np.isnan(train_loss) or np.isinf(train_loss):
+             print(f"ERROR: Training loss is NaN/Inf at iteration {i}. Stopping training.", file=sys.stderr)
+             return None
 
         # Backward propagation
-        grads = backward_prop(AL, Y_train, caches)
+        grads = backward_prop(AL_train, Y_train, caches, hidden_activation=hidden_activation)
 
-        # Check for NaN/inf in gradients
+        # Check gradients for NaN/Inf
         for key, grad in grads.items():
-            if np.isnan(grad).any() or np.isinf(grad).any():
-                 print(f"ERROR: Stopping training at iteration {i+1} due to NaN/inf in gradient '{key}'.", file=sys.stderr)
-                 stop_training_flag = True # Use flag to break outer loop cleanly
-                 break
-        if stop_training_flag:
-            break
+             if np.isnan(grad).any() or np.isinf(grad).any():
+                  print(f"ERROR: Stopping training at iteration {i} due to NaN/inf in gradient '{key}'.", file=sys.stderr)
+                  return None
 
         # Update parameters
         parameters = update_params(parameters, grads, alpha)
 
-        # Check for NaN/inf in updated parameters
+        # Check parameters for NaN/Inf
         for key, param in parameters.items():
             if np.isnan(param).any() or np.isinf(param).any():
-                 print(f"ERROR: Stopping training at iteration {i+1} due to NaN/inf in updated parameter '{key}'.", file=sys.stderr)
-                 stop_training_flag = True
-                 break
-        if stop_training_flag:
-            break
+                 print(f"ERROR: Stopping training at iteration {i} due to NaN/inf in updated parameter '{key}'.", file=sys.stderr)
+                 return None
 
-        # Call progress callback
+        # --- Calculate Validation Accuracy ---
+        # Predict on development set using current parameters
+        AL_dev, _, forward_status_dev = forward_prop(X_dev, parameters, hidden_activation=hidden_activation)
+        if not forward_status_dev:
+            print(f"WARN: Forward propagation failed on dev set at iteration {i}. Skipping validation.", file=sys.stderr)
+            val_acc = 0.0 # Assign a default or handle as appropriate
+        else:
+            predictions_dev = get_predictions(AL_dev)
+            val_acc = get_accuracy(predictions_dev, Y_dev_flat) # Use flattened Y_dev
+        val_accuracy_history.append(val_acc)
+        # -----------------------------------\n
+        # --- Log Progress & Call Callback ---
+        print(f"Iter: {i+1}/{iterations} | Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f}", file=sys.stderr)
         if progress_callback:
-            should_continue = progress_callback(i + 1, iterations)
+            # Pass iteration (1-based), total, loss, accuracy
+            should_continue = progress_callback(i + 1, iterations, train_loss, val_acc)
             if not should_continue:
-                print(f"\n--- STOP SIGNALLED via callback at iteration {i+1} ---", file=sys.stderr)
-                break
+                print(f"INFO: Training stopped at iteration {i+1} by callback.", file=sys.stderr)
+                return None # Indicate stop via callback
+        # -----------------------------------
 
-        # Log progress and validation accuracy periodically
-        if i % log_interval == 0 or i == iterations - 1:
-            train_loss = compute_loss(AL, Y_train)
-            train_loss_history.append(train_loss)
+        # --- Early Stopping Check ---
+        if patience > 0:
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                epochs_no_improve = 0
+                best_params = parameters.copy() # Save the best parameters found so far
+                print(f"  INFO: New best validation accuracy: {best_val_acc:.4f} at epoch {i+1}", file=sys.stderr)
+            else:
+                epochs_no_improve += 1
 
-            val_predictions = make_predictions(X_dev, parameters)
-            val_accuracy = get_accuracy(val_predictions, Y_dev)
-            val_accuracy_history.append(val_accuracy)
+            if epochs_no_improve >= patience:
+                print(f"INFO: Early stopping triggered at iteration {i+1} after {patience} epochs without validation accuracy improvement.", file=sys.stderr)
+                print(f"INFO: Returning parameters from epoch {i+1-patience} with best validation accuracy: {best_val_acc:.4f}", file=sys.stderr)
+                # Return the *best* parameters found and history up to this point
+                return best_params, loss_history, val_accuracy_history
+        # ---------------------------
 
-            # Early Stopping Check
-            if patience > 0:
-                if val_accuracy > best_val_accuracy:
-                    best_val_accuracy = val_accuracy
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"\n--- EARLY STOPPING TRIGGERED at iteration {i+1} ---", file=sys.stderr)
-                    break
-
-            print(f"Iter: {i+1}/{iterations} | Train Loss: {train_loss:.4f} | Val Acc: {val_accuracy:.4f}")
-
-    return parameters, train_loss_history, val_accuracy_history
+    print("--- Gradient Descent Finished ---", file=sys.stderr)
+    # If early stopping was enabled, return best_params, otherwise return final params
+    final_params = best_params if patience > 0 else parameters
+    return final_params, loss_history, val_accuracy_history
 
 # --- Prediction Function ---
 
-def make_predictions(X: np.ndarray, parameters: Dict[str, np.ndarray]) -> np.ndarray:
-    """Makes predictions using the trained multi-layer model."""
-    AL, _, status = forward_prop(X, parameters)
+def make_predictions(X: np.ndarray, parameters: Dict[str, np.ndarray], hidden_activation: str = "relu") -> np.ndarray:
+    """Makes predictions using the learned parameters."""
+    AL, _, status = forward_prop(X, parameters, hidden_activation=hidden_activation)
     if not status:
-        print("Warning: Forward propagation failed during prediction. Returning empty predictions.", file=sys.stderr)
-        return np.array([])
-    predictions: np.ndarray = get_predictions(AL)
+        print("ERROR: Forward propagation failed during prediction.", file=sys.stderr)
+        # Return default predictions (e.g., zeros) or raise error
+        num_classes = parameters[f"W{len(parameters)//2}"].shape[0]
+        return np.zeros(X.shape[1], dtype=int)
+    predictions = get_predictions(AL)
     return predictions

@@ -34,7 +34,7 @@ class TrainingWorker(QObject):
 
     # Removed error_occurred signal, will emit finished(None) on error instead for simplicity
 
-    def __init__(self, X_train, Y_train, X_dev, Y_dev, initial_parameters: Dict[str, np.ndarray], epochs: int, alpha: float, patience: int):
+    def __init__(self, X_train, Y_train, X_dev, Y_dev, initial_parameters: Dict[str, np.ndarray], epochs: int, alpha: float, patience: int, activation_function: str):
         super().__init__()
         self.X_train = X_train
         self.Y_train = Y_train
@@ -44,6 +44,7 @@ class TrainingWorker(QObject):
         self.epochs = epochs
         self.alpha = alpha
         self.patience = patience
+        self.activation_function = activation_function # Store the selected activation
         self._is_running = True # Flag to control the loop
 
     def stop(self):
@@ -64,12 +65,13 @@ class TrainingWorker(QObject):
 
         try:
             # Define the callback function to emit progress and check for stop request
-            def progress_callback(iteration, total_iterations):
+            def progress_callback(iteration, total_iterations, train_loss, val_acc):
                 if not self._is_running:
                     self.log_message.emit("Stop detected during training iteration.")
                     return False # Signal gradient_descent to stop
 
                 # Calculate percentage completion based on iterations
+                # (Note: train_loss and val_acc are available here if needed for more complex progress reporting)
                 percent_complete = int((iteration / total_iterations) * 100) if total_iterations > 0 else 0
                 self.progress.emit(percent_complete)
                 return True # Continue training
@@ -79,7 +81,8 @@ class TrainingWorker(QObject):
                 self.X_train, self.Y_train, self.X_dev, self.Y_dev,
                 self.alpha, self.epochs,
                 self.parameters, # Pass the parameters dictionary
-                progress_callback=progress_callback, # Pass our simplified callback
+                hidden_activation=self.activation_function, # Pass activation function with correct keyword
+                progress_callback=progress_callback, # Pass our updated callback
                 patience=self.patience # Pass patience
             )
 
