@@ -535,106 +535,89 @@ def load_multiple_npy_datasets(npy_path_index_map: Dict[str, int],
 
 def load_emoji_dataset(csv_path: str,
                        image_column: str = 'Google',
-                       validation_split: Union[int, float] = 0.1) -> LoadResult:
-    """Loads the Emoji dataset from a CSV containing base64 encoded images.
+                       validation_split: Union[int, float] = 0.1) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], int, Optional[List[str]]]:
+    """Loads emoji data from a CSV file.
+
+    Assumes the CSV has columns like 'name', 'codepoint', and columns for image providers (e.g., 'Google', 'Apple').
+    The specified image_column must contain base64 encoded image strings.
 
     Args:
-        csv_path (str): Path to the emojis.csv file.
-        image_column (str): The column name containing the base64 encoded PNG data
-                            (e.g., 'Google', 'Apple').
-        validation_split (float or int): Fraction (if float < 1) or number of samples
-                                       (if int >= 1) to use for the development set.
-                                       Defaults to 0.1 (10%).
+        csv_path (str): Path to the emoji dataset CSV file.
+        image_column (str): Name of the column containing base64 image strings (e.g., 'Google').
+        validation_split (Union[int, float]): Number or fraction for validation set.
 
     Returns:
-        tuple: (X_train, Y_train, X_dev, Y_dev) containing processed image data
-               and integer labels, or (None, None, None, None) on error.
+        tuple: (X_train, Y_train, X_dev, Y_dev, num_classes, class_names)
+               Returns (None, None, None, None, 0, None) on failure.
     """
     if not os.path.exists(csv_path):
         print(f"Error: Emoji CSV file not found at {csv_path}", file=sys.stderr)
-        return None, None, None, None, 0
-
-    all_X_data = []
-    all_Y_labels = [] # Store original emoji names/symbols temporarily
-    label_map = {}    # Map emoji name/symbol to integer index
-    next_label_index = 0
-
-    print(f"Loading Emoji dataset from {csv_path} using '{image_column}' column...", file=sys.stderr)
+        return None, None, None, None, 0, None
 
     try:
         df = pd.read_csv(csv_path)
+        required_cols = ['name', image_column]
+        if not all(col in df.columns for col in required_cols):
+            print(f"Error: Emoji CSV must contain columns: {required_cols}", file=sys.stderr)
+            return None, None, None, None, 0, None
 
-        # Check if required columns exist
-        if 'name' not in df.columns or image_column not in df.columns:
-             print(f"Error: CSV missing required columns ('name' and '{image_column}').", file=sys.stderr)
-             return None, None, None, None, 0
+        # Filter out rows with missing image data in the selected column
+        df_filtered = df.dropna(subset=[image_column])
+        num_original = len(df)
+        num_filtered = len(df_filtered)
+        if num_filtered < num_original:
+            print(f"Warning: Dropped {num_original - num_filtered} rows due to missing data in '{image_column}' column.", file=sys.stderr)
+        if num_filtered == 0:
+             print(f"Error: No valid data found in '{image_column}' column.", file=sys.stderr)
+             return None, None, None, None, 0, None
 
-        total_emojis = len(df)
-        print(f"Processing {total_emojis} emojis...", file=sys.stderr)
+        # Process base64 images
+        all_X_data: List[np.ndarray] = []
+        all_Y_names: List[str] = [] # Store names corresponding to processed images
+        processed_indices: List[int] = [] # Keep track of successfully processed rows
 
-        for index, row in df.iterrows():
-            emoji_name = row['name']
-            base64_string = row[image_column]
-
-            # Check if base64 string is present and non-empty string
-            if pd.isna(base64_string) or not isinstance(base64_string, str) or not base64_string.strip():
-                print(f"  Warning: Skipping row {index+1} ('{emoji_name}') - Invalid or missing base64 data in '{image_column}' column.", file=sys.stderr)
-                continue
-
-            try:
-                # --- Use utility function to decode and process image ---
-                img_vector = process_image_from_base64(base64_string)
-
-                if img_vector is None:
-                    print(f"  Warning: Skipping row {index+1} ('{emoji_name}') - Image processing failed.", file=sys.stderr)
-                    continue
-
-                # --- Image vector is already flattened and normalized ---
-                # img_processed = img.convert('L').resize((28, 28), Image.LANCZOS)
-                # img_array = np.array(img_processed).astype(float) / 255.0
-                # img_vector = img_array.flatten() # Shape (784,)
-                # --- Checks are done inside the utility function ---
-                # if img_vector.shape != (784,):
-                #      print(f"  Warning: Skipping row {index+1} ('{emoji_name}') - Incorrect image vector shape after processing: {img_vector.shape}", file=sys.stderr)
-                #      continue
-
+        for index, row in df_filtered.iterrows():
+            base64_str = row[image_column]
+            name = row['name']
+            img_vector = process_image_from_base64(base64_str)
+            if img_vector is not None:
                 all_X_data.append(img_vector)
-                all_Y_labels.append(emoji_name)
+                all_Y_names.append(name)
+                processed_indices.append(index)
+            else:
+                 print(f"  Warning: Skipping emoji '{name}' (row index {index}) - failed to process image.", file=sys.stderr)
 
-            except Exception as img_err:
-                print(f"  Warning: Skipping row {index+1} ('{emoji_name}') - Error processing image data: {img_err}", file=sys.stderr)
-
-        # --- Convert Labels to Integers ---
         num_samples = len(all_X_data)
         if num_samples == 0:
-             print("Error: No valid emoji images could be processed.", file=sys.stderr)
-             return None, None, None, None, 0
+            print("Error: No emoji images could be processed.", file=sys.stderr)
+            return None, None, None, None, 0, None
 
-        print(f"Successfully processed {num_samples} emojis.", file=sys.stderr)
+        # --- Create Label Mapping from Names --- #
+        unique_names = sorted(list(set(all_Y_names)))
+        num_classes = len(unique_names)
+        class_names = unique_names # This is the list of names we want to return
+        name_to_index = {name: i for i, name in enumerate(unique_names)}
+        Y_labels = np.array([name_to_index[name] for name in all_Y_names], dtype=int)
+        print(f"Processed {num_samples} emojis across {num_classes} classes.", file=sys.stderr)
+        # --------------------------------------- #
 
-        # Create integer labels and map
-        unique_labels = sorted(list(set(all_Y_labels)))
-        num_classes = len(unique_labels)
-        label_map = {name: i for i, name in enumerate(unique_labels)}
-        Y_int_labels = np.array([label_map[name] for name in all_Y_labels], dtype=int)
-
-        print(f"Found {num_classes} unique emoji classes.", file=sys.stderr)
-
-        # --- Combine, Shuffle, Split --- # Use Helper function
         X_combined_flat = np.array(all_X_data) # Shape (num_samples, 784)
-        X_train, Y_train, X_dev, Y_dev = _reshape_and_split_data(X_combined_flat, Y_int_labels, validation_split)
 
-        print(f"Total number of classes in Emoji dataset: {num_classes}", file=sys.stderr)
+        # Shuffle and split
+        X_train, Y_train, X_dev, Y_dev = _reshape_and_split_data(X_combined_flat, Y_labels, validation_split)
 
-        return X_train, Y_train, X_dev, Y_dev, num_classes
+        return X_train, Y_train, X_dev, Y_dev, num_classes, class_names
 
+    except FileNotFoundError:
+        print(f"Error: Emoji CSV file not found at {csv_path}", file=sys.stderr)
+        return None, None, None, None, 0, None
     except pd.errors.EmptyDataError:
         print(f"Error: Emoji CSV file is empty: {csv_path}", file=sys.stderr)
-        return None, None, None, None, 0
+        return None, None, None, None, 0, None
     except Exception as e:
-        print(f"Error loading Emoji dataset from {csv_path}: {e}", file=sys.stderr)
-        traceback.print_exc()
-        return None, None, None, None, 0
+        print(f"Error loading or processing emoji dataset {csv_path}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None, None, None, None, 0, None
 
 # Example usage:
 # if __name__ == "__main__":

@@ -26,6 +26,8 @@ __pycache__/
 .txt.*.*.*.*.*
 .txt.*.*.*.*.*.*
 
+/data/images/
+
 FUTURE_TODO.txt
 TODO.txt
 

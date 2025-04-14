@@ -154,11 +154,12 @@ class MainWindow(QMainWindow):
         self.current_labels: Optional[np.ndarray] = None
         self.current_dataset_name: Optional[str] = None
         self.num_classes: int = 0 # Number of classes in the loaded dataset
-        self.model_params: Optional[tuple] = None # Stores trained weights and biases (W1, b1, W2, b2)
+        self.model_params: Optional[dict] = None # Stores trained weights and biases (W1, b1, W2, b2)
         self.training_worker: Optional[TrainingWorker] = None
         self.training_thread: Optional[QThread] = None
         self.train_loss_history: List[float] = []
         self.val_accuracy_history: List[float] = []
+        self.class_names: Optional[List[str]] = None # List to store class names (e.g., ["cat", "dog", ...])
 
     # --- UI Group Creation Methods --- #
 
@@ -230,33 +231,6 @@ class MainWindow(QMainWindow):
         # Use a QVBoxLayout for arranging controls vertically within the group box.
         layout = QVBoxLayout()
 
-        # -- Removed Model Template and Custom Hidden Layer Size --
-        # # Layout for Model Template selection (Label + Dropdown)
-        # model_layout = QHBoxLayout()
-        # model_label = QLabel("Model Template:")
-        # model_layout.addWidget(model_label)
-        # self.template_combo = QComboBox()
-        # self.template_combo.setToolTip("Select a model structure or choose 'Custom'")
-        # self.template_combo.currentIndexChanged[str].connect(self._update_hidden_layer_input)
-        # model_layout.addWidget(self.template_combo)
-        # model_layout.addStretch()
-        # layout.addLayout(model_layout)
-        # 
-        # # Layout for Custom Hidden Layer Size (Label + SpinBox)
-        # hidden_layout = QHBoxLayout()
-        # hidden_label = QLabel("Hidden Layer Neurons:")
-        # hidden_layout.addWidget(hidden_label)
-        # self.hidden_layer_input = QSpinBox()
-        # self.hidden_layer_input.setRange(1, 10000)
-        # self.hidden_layer_input.setValue(10)
-        # self.hidden_layer_input.setToolTip("Number of neurons in the hidden layer (if template is 'Custom')")
-        # self.hidden_layer_input.setEnabled(False)
-        # hidden_layout.addWidget(self.hidden_layer_input)
-        # hidden_layout.addStretch()
-        # layout.addLayout(hidden_layout)
-        # 
-        # # self._populate_model_dropdown() # Removed call
-
         # --- Add QLineEdit for Hidden Layer Configuration ---
         config_layout = QHBoxLayout()
         config_label = QLabel("Hidden Layers (neurons, comma-separated):")
@@ -267,52 +241,77 @@ class MainWindow(QMainWindow):
         layout.addLayout(config_layout)
         # -----------------------------------------------------
 
-        # Layout for Training Hyperparameters (Epochs, Learning Rate, Patience)
-        param_layout = QFormLayout() # Form layout for label-widget pairs
+        # --- Hyperparameters --- #
+        # Layout for Hyperparameters (Epochs, Learning Rate)
+        hyper_layout = QHBoxLayout()
+        hyper_label = QLabel("Epochs:")
+        hyper_layout.addWidget(hyper_label)
         self.epochs_input = QSpinBox()
-        self.epochs_input.setRange(1, 10000)
-        self.epochs_input.setValue(50) # Default epochs
-        self.epochs_input.setToolTip("Number of passes through the entire training dataset")
-        param_layout.addRow("Epochs:", self.epochs_input)
+        self.epochs_input.setRange(1, 10000) # Min 1 epoch, max 10000
+        self.epochs_input.setValue(100) # Default value
+        self.epochs_input.setToolTip("Number of training iterations through the entire dataset")
+        hyper_layout.addWidget(self.epochs_input)
 
-        self.lr_input = QDoubleSpinBox() # Use QDoubleSpinBox for floating point learning rate
-        self.lr_input.setRange(0.00001, 1.0)
-        self.lr_input.setSingleStep(0.001)
-        self.lr_input.setDecimals(5) # Show more precision
-        self.lr_input.setValue(0.01) # Default learning rate
-        self.lr_input.setToolTip("Learning Rate (alpha): Step size for weight updates during training")
-        param_layout.addRow("Learning Rate:", self.lr_input)
+        lr_label = QLabel("Learn Rate (α):")
+        hyper_layout.addWidget(lr_label)
+        self.learning_rate_input = QDoubleSpinBox()
+        self.learning_rate_input.setRange(0.0001, 1.0) # Min/Max learning rate
+        self.learning_rate_input.setDecimals(4) # Show 4 decimal places
+        self.learning_rate_input.setSingleStep(0.001) # Step size when using arrows
+        self.learning_rate_input.setValue(0.01) # Default value
+        self.learning_rate_input.setToolTip("Controls how much the model weights are adjusted during training (alpha)")
+        hyper_layout.addWidget(self.learning_rate_input)
 
+        patience_label = QLabel("Patience:")
+        hyper_layout.addWidget(patience_label)
         self.patience_input = QSpinBox()
-        self.patience_input.setRange(0, 100) # 0 means no early stopping
-        self.patience_input.setValue(5) # Default patience
-        self.patience_input.setToolTip("Early Stopping Patience: Stop training if validation accuracy doesn't improve for this many checks (0 to disable)")
-        param_layout.addRow("Patience:", self.patience_input)
+        self.patience_input.setRange(0, 1000) # 0 means no early stopping
+        self.patience_input.setValue(10) # Default patience
+        self.patience_input.setToolTip("Epochs to wait for improvement before stopping early (0=disabled)")
+        hyper_layout.addWidget(self.patience_input)
 
-        layout.addLayout(param_layout)
 
-        # Training Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        hyper_layout.addStretch() # Pushes hyperparameter widgets to the left
+        layout.addLayout(hyper_layout) # Add the hyperparameter layout to the main vertical layout
 
-        # Layout for Start/Stop Training Buttons
-        button_layout = QHBoxLayout()
-        self.train_button = QPushButton("🚀 Start Training")
-        self.train_button.clicked.connect(self.start_training)
-        self.train_button.setEnabled(False) # Disabled until a dataset is loaded
-        button_layout.addWidget(self.train_button)
+        # --- Training Action Buttons --- #
+        # Layout for Training Buttons (Start, Stop)
+        action_layout = QHBoxLayout()
+        self.start_button = QPushButton("🚀 Start Training")
+        self.start_button.clicked.connect(self.start_training)
+        self.start_button.setEnabled(False) # Disabled until data is loaded
+        self.start_button.setToolTip("Begin the model training process (requires loaded data)")
+        action_layout.addWidget(self.start_button)
 
         self.stop_button = QPushButton("🛑 Stop Training")
         self.stop_button.clicked.connect(self._stop_training)
         self.stop_button.setEnabled(False) # Disabled until training starts
-        button_layout.addWidget(self.stop_button)
-        layout.addLayout(button_layout)
+        self.stop_button.setToolTip("Interrupt the currently running training process")
+        action_layout.addWidget(self.stop_button)
+        layout.addLayout(action_layout)
 
-        # Apply the arrangement of widgets (layout) to the group box
-        self.training_group.setLayout(layout)
-        return self.training_group
+        # --- Progress Bar --- #
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True) # Show percentage text
+        self.progress_bar.setValue(0) # Start at 0%
+        self.progress_bar.setToolTip("Shows the progress of the current training run")
+        layout.addWidget(self.progress_bar)
+
+        # --- Accuracy Display Label --- #
+        accuracy_layout = QHBoxLayout()
+        self.accuracy_label = QLabel("Final Validation Accuracy: --")
+        self.accuracy_label.setToolTip("Accuracy achieved on the validation set after training completes")
+        accuracy_layout.addWidget(self.accuracy_label)
+        accuracy_layout.addStretch() # Push label to the left
+        layout.addLayout(accuracy_layout) # Add it below the plot widget
+
+        # Add connections that depend on UI elements within this group
+        # self.template_combo.currentIndexChanged[str].connect(self._update_hidden_layer_input) # Reconnect if using templates
+        # self._populate_model_dropdown() # Populate dropdown now that combo exists
+
+        self.training_group.setLayout(layout) # Apply the layout to the group box
+        self.training_group.setEnabled(False) # Disable group until data is loaded
+        return self.training_group # Return the created group box
 
     def _create_model_mgmt_group(self):
         """Creates the GroupBox for saving and loading model weights."""
@@ -377,11 +376,11 @@ class MainWindow(QMainWindow):
 
         # Vertical layout for the Predict and Clear buttons next to the canvas
         drawing_buttons_layout = QVBoxLayout()
-        predict_drawing_button = QPushButton("Predict Drawing")
-        predict_drawing_button.setToolTip("Predict the digit currently drawn on the canvas")
+        self.predict_drawing_button = QPushButton("Predict Drawing")
+        self.predict_drawing_button.setToolTip("Predict the digit currently drawn on the canvas")
         # Connect click to the method handling drawing prediction
-        predict_drawing_button.clicked.connect(self._predict_drawing)
-        drawing_buttons_layout.addWidget(predict_drawing_button)
+        self.predict_drawing_button.clicked.connect(self._predict_drawing)
+        drawing_buttons_layout.addWidget(self.predict_drawing_button)
 
         clear_button = QPushButton("Clear Canvas")
         # Connect click to the drawing canvas's own clearCanvas method
@@ -527,40 +526,67 @@ class MainWindow(QMainWindow):
 
     # New slots to handle signals from the worker
     def _handle_training_finished(self, results):
+        # This slot is called when the TrainingWorker's finished signal is emitted
+        self.progress_bar.setValue(100) # Ensure progress bar shows 100%
+        self.start_button.setEnabled(True) # Re-enable start button
+        self.stop_button.setEnabled(False) # Disable stop button
+        self.training_group.setEnabled(True) # Re-enable training controls
+
+        # Stop the loading animation in the plot widget
+        # if self.plot_widget: # REMOVED - No embedded plot widget
+        #     self.plot_widget.stop_loading_animation()
+
+
         if results is None:
-            self._log_message("Training finished with errors or was stopped.")
-            # Optionally reset plot, etc., if needed
-            # self.training_plot_widget.clear_plot() # Example
-            # Ensure UI state is reset correctly by _cleanup_thread
-            self._cleanup_thread() # Make sure cleanup happens
-            return
-
-        self._log_message("Training finished successfully. Updating model parameters and plot.")
-        # Unpack results - Ensure results is not None before unpacking
-        # ... (rest of the code assumes results is not None)
-        self.model_params = results[0] # Parameters dictionary is the first element
-        self.train_loss_history = results[1] # Loss history is the second element
-        self.val_accuracy_history = results[2] # Accuracy history is the third element
-
-        # --- Update the main plot --- #
-        if hasattr(self, 'training_plot_widget') and self.training_plot_widget:
-            self.training_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
+            self._log_message("Training did not complete successfully or was stopped.")
+            self.accuracy_label.setText("Final Validation Accuracy: --") # Reset accuracy label
         else:
-            self._log_message("Warning: Could not find training_plot_widget to update.")
+            parameters_dict, loss_hist, val_acc_hist = results # Unpack the results tuple
+            self._log_message(f"Training finished. Final Loss: {loss_hist[-1]:.4f} (Lowest: {min(loss_hist):.4f})")
 
-        # --- Update expanded plot if it exists --- #
-        if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible():
-            # Find the plot widget within the dialog (assuming it's the only PlotWidget)
-            expanded_plot = self.expanded_plot_dialog.findChild(PlotWidget)
-            if expanded_plot:
-                expanded_plot.update_plot(self.train_loss_history, self.val_accuracy_history)
+            # Update model parameters with the results from the worker thread
+            self.model_params = parameters_dict # Store the dictionary
+            self._log_message(f"Model parameters updated. {len(self.model_params)} parameter arrays.")
+
+            # Update the plot with final history
+            self.train_loss_history = loss_hist
+            self.val_accuracy_history = val_acc_hist
+            # if self.plot_widget: # REMOVED - No embedded plot widget
+            #     self.plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
+
+            # Also update the expanded plot if it's open
+            if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible(): # Check if dialog exists and is visible
+                 # Find the plot widget within the dialog
+                 dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
+                 if dialog_plot_widget:
+                     try:
+                         # Pass history data to the dialog's plot widget
+                         dialog_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
+                         self._log_message("Updated expanded plot with final history.")
+                     except Exception as e:
+                         self._log_message(f"Error updating expanded plot: {e}")
+                 else:
+                     self._log_message("Warning: Could not find PlotWidget in expanded dialog to update.")
+
+            # Update accuracy label with the final validation accuracy
+            if val_acc_hist:
+                final_accuracy = val_acc_hist[-1] * 100 # Convert to percentage
+                self.accuracy_label.setText(f"Final Validation Accuracy: {final_accuracy:.2f}%")
+                self._log_message(f"Final Validation Accuracy: {final_accuracy:.2f}%")
             else:
-                 self._log_message("Warning: Could not find PlotWidget in expanded dialog to update.")
+                self.accuracy_label.setText("Final Validation Accuracy: N/A")
+                self._log_message("No validation accuracy history received.")
 
-        # --- Cleanup handled by thread's finished signal connection --- # Keep this comment
-        # self._cleanup_thread() # Don't call directly here, let signal handle it
-        # Enable save button now that we have trained parameters
-        self.save_button.setEnabled(True)
+
+            # Update UI elements that depend on having a trained model
+            self.save_button.setEnabled(True)
+            # Enable prediction only if a model is trained
+            self.predict_drawing_button.setEnabled(True)
+            self.predict_file_button.setEnabled(True)
+
+
+        # Clean up the thread and worker object
+        self._cleanup_thread() # Important to release resources
 
     def _handle_worker_log(self, message):
         # Simple pass-through logging for now
@@ -581,7 +607,7 @@ class MainWindow(QMainWindow):
         self.training_thread = None
         self.training_worker = None
         # Reset UI elements
-        self.train_button.setEnabled(True) 
+        self.start_button.setEnabled(True) 
         self.stop_button.setText("Stop Training") # Reset text
         self.stop_button.setEnabled(False)
         self.progress_bar.setVisible(False)
@@ -610,8 +636,11 @@ class MainWindow(QMainWindow):
                 qpixmap_orig = QPixmap(file_name)
                 if qpixmap_orig.isNull():
                     self._log_message(f"Warning: QPixmap failed to load {file_name} directly. Trying PIL conversion.")
-                    rgb_img = img.convert('RGB')
-                    qimage = QImage(rgb_img.tobytes("raw", "RGB"), rgb_img.width, rgb_img.height, QImage.Format_RGB888)
+                    # Ensure image is RGB before creating QImage for QPixmap
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    # Create QImage from PIL bytes
+                    qimage = QImage(img.tobytes("raw", "RGB"), img.width, img.height, QImage.Format_RGB888)
                     qpixmap_orig = QPixmap.fromImage(qimage)
 
                 scaled_pixmap = qpixmap_orig.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -625,26 +654,28 @@ class MainWindow(QMainWindow):
                      return # Exit the try block and method if no model
 
                 # Perform forward propagation using the parameters dictionary
-                # _, _, _, output, status = neural_net.forward_prop(*self.model_params, img_array) # OLD call
-                output_preds = neural_net.make_predictions(img_array, self.model_params)
-                if output_preds.size == 0: # make_predictions returns empty on error
-                    self._log_message("ERROR: Prediction failed (forward prop error?).")
-                    self.probability_graph.clear_graph()
-                    return 
-                
-                # Need output probabilities, not just predictions, for the graph
-                # Rerun forward_prop to get the final activation layer (AL)
                 AL, _, status = neural_net.forward_prop(img_array, self.model_params)
                 if not status:
                     self._log_message("ERROR: Forward propagation failed when getting probabilities.")
                     self.probability_graph.clear_graph()
                     return
 
-                prediction = np.argmax(AL) # Get prediction from probabilities
-                self._log_message(f"Prediction Result: {prediction}")
+                prediction = np.argmax(AL) # Get predicted class index
+                probabilities = AL.flatten()
 
-                # Update probability bar graph with the output probabilities
-                self.probability_graph.set_probabilities(AL.flatten(), prediction)
+                # --- Get Class Name --- #
+                predicted_name = str(prediction) # Default to index string
+                display_names = None # Default to no specific names for graph
+                if self.class_names and prediction < len(self.class_names):
+                    predicted_name = self.class_names[prediction]
+                    display_names = self.class_names # Use names for graph labels
+                    self._log_message(f"Prediction Result: Index={prediction}, Name='{predicted_name}'")
+                else:
+                    self._log_message(f"Prediction Result: Index={prediction} (No class name mapping found or index out of range)")
+                # -------------------- #
+
+                # Update probability bar graph with probabilities and class names (if available)
+                self.probability_graph.set_probabilities(probabilities, predicted_name, display_names)
 
             except Exception as e:
                 self._log_message(f"ERROR during prediction process: {e}")
@@ -663,13 +694,14 @@ class MainWindow(QMainWindow):
              return
 
         self._log_message(f"=== Starting Training Thread for {self.dataset_dropdown.currentText()} ===") # Use dataset_dropdown
-        self.train_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True) # Enable stop button
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         QApplication.processEvents()
 
         epochs = self.epochs_input.value()
-        learning_rate = self.lr_input.value()
+        learning_rate = self.learning_rate_input.value()
         patience = self.patience_input.value()
         self._log_message(f"Hyperparameters: Epochs={epochs}, Learning Rate={learning_rate}, Patience={patience}")
         self.progress_bar.setMaximum(epochs)
@@ -679,13 +711,13 @@ class MainWindow(QMainWindow):
         # Create worker instance with necessary data
         if self.model_params is None:
             self._log_message("ERROR: Model parameters are not initialized. Cannot start training.")
-            self.train_button.setEnabled(True) # Re-enable train button
+            self.start_button.setEnabled(True) # Re-enable train button
             self.stop_button.setEnabled(False)
             self.progress_bar.setVisible(False)
             return
         if self.current_num_classes <= 0:
              self._log_message("ERROR: Number of classes not determined. Cannot start training.")
-             self.train_button.setEnabled(True) # Re-enable train button
+             self.start_button.setEnabled(True) # Re-enable train button
              self.stop_button.setEnabled(False)
              self.progress_bar.setVisible(False)
              return
@@ -733,7 +765,7 @@ class MainWindow(QMainWindow):
                 # Update UI immediately to show stopping state
                 self.stop_button.setText("Stopping...")
                 self.stop_button.setEnabled(False)
-                self.train_button.setEnabled(False)
+                self.start_button.setEnabled(False)
                 # DO NOT call cleanup/wait here - let the finished signal handle it
             else:
                 self._log_message("Stop requested, but worker object not found.")
@@ -904,6 +936,7 @@ class MainWindow(QMainWindow):
         self._log_message(f"Loading NPY: {dataset_name} from {npy_path} (Category Index: {category_index}, Total QD Classes: {num_classes})")
         # Reset existing data before loading new
         self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
+        self.class_names = None # Reset class names
         # Pass category_index, num_classes, and validation_split to the loader function
         loaded_data = datasets.load_npy_dataset(npy_path, category_index, num_classes, validation_split=validation_split)
         self.X_train, self.Y_train, self.X_dev, self.Y_dev, loaded_num_classes = loaded_data
@@ -912,10 +945,23 @@ class MainWindow(QMainWindow):
             self._log_message(f"Dataset '{dataset_name}' loaded successfully.")
             # Store num_classes for potential use in training setup
             self.current_num_classes = num_classes
+
+            # --- Extract class names from path_index_map --- #
+            if path_index_map:
+                # Create a list of names, sorted by index
+                # Assumes map is {path: index}
+                sorted_items = sorted(path_index_map.items(), key=lambda item: item[1]) # Sort by index
+                self.class_names = [os.path.splitext(os.path.basename(path))[0].replace("_", " ") for path, index in sorted_items]
+                self._log_message(f"Loaded class names: {self.class_names}")
+            else:
+                self.class_names = None
+            # -------------------------------------------------- #
+
             self._post_load_update(dataset_name)
         else:
             self._log_message(f"ERROR: Failed to load {dataset_name} from {npy_path}. Check file format and ensure it contains valid data.")
             self.training_group.setTitle("Training Controls (Load failed)")
+            self.class_names = None # Reset class names on failure
 
     # --- Helper method for loading multiple NPY (internal logic) ---
     def _load_multiple_npy_internal(self, dataset_name, path_index_map, validation_split=0.1):
@@ -931,10 +977,23 @@ class MainWindow(QMainWindow):
             self._log_message(f"Combined dataset '{dataset_name}' loaded successfully.")
             # Store num_classes for potential use in training setup
             self.current_num_classes = loaded_num_classes # Use num_classes returned by loader
+
+            # --- Extract class names from path_index_map --- #
+            if path_index_map:
+                # Create a list of names, sorted by index
+                # Assumes map is {path: index}
+                sorted_items = sorted(path_index_map.items(), key=lambda item: item[1]) # Sort by index
+                self.class_names = [os.path.splitext(os.path.basename(path))[0].replace("_", " ") for path, index in sorted_items]
+                self._log_message(f"Loaded class names: {self.class_names}")
+            else:
+                self.class_names = None
+            # -------------------------------------------------- #
+
             self._post_load_update(dataset_name)
         else:
             self._log_message(f"ERROR: Failed to load combined dataset '{dataset_name}'. Check logs for details.")
             self.training_group.setTitle("Training Controls (Load failed)")
+            self.class_names = None # Reset class names on failure
 
     # --- Helper method for loading Emoji CSV (internal logic) ---
     def _load_emoji_internal(self, dataset_name, csv_path, image_col='Google', validation_split=0.1):
@@ -943,31 +1002,39 @@ class MainWindow(QMainWindow):
         self.X_train, self.Y_train, self.X_dev, self.Y_dev = None, None, None, None
         # Call the dataset loader
         loaded_data = datasets.load_emoji_dataset(csv_path, image_column=image_col, validation_split=validation_split)
-        self.X_train, self.Y_train, self.X_dev, self.Y_dev, loaded_num_classes = loaded_data
+        # Unpack the 6 results: Xtr, Ytr, Xdev, Ydev, n_classes, names
+        self.X_train, self.Y_train, self.X_dev, self.Y_dev, loaded_num_classes, self.class_names = loaded_data
 
         if self.X_train is not None:
             self._log_message(f"Dataset '{dataset_name}' loaded successfully.")
-            # Determine num_classes from the loaded labels
-            num_classes = 0
-            if self.Y_train is not None and len(self.Y_train) > 0:
-                num_classes = int(np.max(self.Y_train)) + 1 # Assumes labels are 0-based indices
-                if self.Y_dev is not None and len(self.Y_dev) > 0:
-                    num_classes = max(num_classes, int(np.max(self.Y_dev)) + 1)
 
-            if num_classes > 0:
-                 self.current_num_classes = num_classes
-                 self._log_message(f"Determined {num_classes} classes for Emojis.")
+            # Determine num_classes from the value returned by the loader
+            self.current_num_classes = loaded_num_classes
+
+            # --- Log loaded class names --- #
+            if self.class_names:
+                self._log_message(f"Loaded {len(self.class_names)} emoji class names.") # e.g. {self.class_names[:5]}...")
+            else:
+                self._log_message("WARN: Emoji loader did not return class names. Cannot display names in predictions.")
+            # ----------------------------- #
+
+            if self.current_num_classes > 0:
+                 self._log_message(f"Using {self.current_num_classes} classes for Emojis.")
                  self._post_load_update(dataset_name)
             else:
-                 self._log_message(f"ERROR: Could not determine number of classes for {dataset_name}. Load failed.")
+                 self._log_message(f"ERROR: Loader returned 0 classes for {dataset_name}. Load failed.")
                  self.training_group.setTitle("Training Controls (Load failed)")
+                 self.class_names = None # Ensure reset on failure
 
         else:
             self._log_message(f"ERROR: Failed to load {dataset_name} from {csv_path}. Check file format and image data.")
             self.training_group.setTitle("Training Controls (Load failed)")
+            self.class_names = None # Ensure reset on failure
 
     # --- Helper method to update UI after successful load ---
     def _post_load_update(self, dataset_name):
+        # Enable the training group now that data is loaded
+        self.training_group.setEnabled(True)
         self.training_group.setTitle(f"Training Controls ({dataset_name})") # Update title
         self.train_loss_history = [] # Reset history when new dataset loaded
         self.val_accuracy_history = []
@@ -993,18 +1060,18 @@ class MainWindow(QMainWindow):
                 self.model_params = neural_net.init_params(layer_dims)
                 self._log_message("Model re-initialized.")
                 self.save_button.setEnabled(False) # Disable save until trained
-                self.train_button.setEnabled(True) # Enable training
+                self.start_button.setEnabled(True) # Enable training
 
             except ValueError as e:
                 self._log_message(f"ERROR: Invalid hidden layer configuration '{self.hidden_layers_input.text()}'. Please enter comma-separated positive integers. {e}")
                 self.model_params = None
-                self.train_button.setEnabled(False)
+                self.start_button.setEnabled(False)
                 self.save_button.setEnabled(False)
             # -------------------------------------- #
         else:
             self._log_message("ERROR: Number of classes is 0 or unknown. Cannot initialize model parameters.")
             self.model_params = None
-            self.train_button.setEnabled(False)
+            self.start_button.setEnabled(False)
             self.save_button.setEnabled(False)
         # -------------------------------------------------------------
 
@@ -1015,7 +1082,7 @@ class MainWindow(QMainWindow):
         # --- Enable/disable image type based on image col input ---
         self._update_image_col_type_state()
         # --- Enable training button --- #
-        self.train_button.setEnabled(True)
+        # self.start_button.setEnabled(True) # REMOVED - Enable ONLY after successful param init
 
     # --- Add slot to update image type combo enabled state ---
     def _update_image_col_type_state(self):
@@ -1104,7 +1171,7 @@ class MainWindow(QMainWindow):
                 # For now, just enable the train button if data is also loaded
                 self._log_message("Loaded parameters might not match the current layer configuration input.")
                 if self.current_dataset is not None:
-                    self.train_button.setEnabled(True)
+                    self.start_button.setEnabled(True)
                 self.save_button.setEnabled(True) # Enable save button after loading
             except Exception as e:
                 self._log_message(f"ERROR loading parameters from {file_path}: {e}")
@@ -1148,8 +1215,6 @@ class MainWindow(QMainWindow):
                  return
 
             # Perform prediction using the parameters dictionary
-            # _, _, _, output, status = neural_net.forward_prop(*self.model_params, img_array) # OLD call
-            # Rerun forward_prop to get the final activation layer (AL) for probabilities
             AL, _, status = neural_net.forward_prop(img_array, self.model_params)
             if not status:
                 self._log_message("ERROR: Forward propagation failed for drawing prediction.")
@@ -1157,10 +1222,21 @@ class MainWindow(QMainWindow):
                 return
 
             prediction = np.argmax(AL)
-            self._log_message(f"Prediction Result: {prediction}")
+            probabilities = AL.flatten()
 
-            # Update probability bar graph
-            self.probability_graph.set_probabilities(AL.flatten(), prediction)
+            # --- Get Class Name --- #
+            predicted_name = str(prediction) # Default to index string
+            display_names = None # Default to no specific names for graph
+            if self.class_names and prediction < len(self.class_names):
+                predicted_name = self.class_names[prediction]
+                display_names = self.class_names # Use names for graph labels
+                self._log_message(f"Prediction Result: Index={prediction}, Name='{predicted_name}'")
+            else:
+                self._log_message(f"Prediction Result: Index={prediction} (No class name mapping found or index out of range)")
+            # -------------------- #
+
+            # Update probability bar graph with probabilities and class names (if available)
+            self.probability_graph.set_probabilities(probabilities, predicted_name, display_names)
 
         except Exception as e:
             self._log_message(f"ERROR during prediction: {e}")
@@ -1206,4 +1282,3 @@ class MainWindow(QMainWindow):
 
         # Show the dialog (non-modal)
         self.expanded_plot_dialog.show()
-    # --- End expanded plot method ---
