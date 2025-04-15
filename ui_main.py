@@ -762,9 +762,9 @@ class MainWindow(QMainWindow):
              self._log_message("WARN: Training is already in progress.")
              return
 
-        self._log_message(f"=== Starting Training Thread for {self.dataset_dropdown.currentText()} ===") # Use dataset_dropdown
+        self._log_message(f"=== Starting Training Thread for {self.dataset_dropdown.currentText()} ===")
         self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True) # Enable stop button
+        self.stop_button.setEnabled(True)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         QApplication.processEvents()
@@ -780,7 +780,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(epochs)
 
         # --- Determine Target Architecture and Check if Re-initialization is Needed --- #
-        reinitialize_params = False
+        reinitialize_model = False
         target_layer_dims = None
         try:
             hidden_layers_str = self.hidden_layers_input.text().strip()
@@ -801,51 +801,49 @@ class MainWindow(QMainWindow):
             target_layer_dims = [input_size] + hidden_dims + [self.current_num_classes]
 
             # Check if re-initialization is needed
-            if self.model_params is None:
-                self._log_message("No existing model parameters found. Initializing new model.")
-                reinitialize_params = True
+            if self.current_model is None:
+                self._log_message("No existing model found. Creating new model.")
+                reinitialize_model = True
             elif self.model_layer_dims != target_layer_dims:
-                self._log_message(f"Target architecture {target_layer_dims} differs from current parameters architecture {self.model_layer_dims}. Re-initializing model.")
-                reinitialize_params = True
+                self._log_message(f"Target architecture {target_layer_dims} differs from current model architecture {self.model_layer_dims}. Creating new model.")
+                reinitialize_model = True
             else:
-                self._log_message(f"Using existing model parameters with architecture: {self.model_layer_dims}")
+                self._log_message(f"Using existing model with architecture: {self.model_layer_dims}")
 
         except ValueError as e:
             self._log_message(f"ERROR determining target architecture or checking for re-initialization: {e}")
-            self.start_button.setEnabled(True) # Re-enable train button on error
+            self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.progress_bar.setVisible(False)
-            return # Stop if config is invalid
-        # ---------------------------------------------------------------------------- #
+            return
 
-        # --- Initialize or Use Existing Parameters --- #
-        if reinitialize_params:
+        # --- Initialize or Use Existing Model --- #
+        if reinitialize_model:
             try:
-                self._log_message(f"Initializing model parameters for layers: {target_layer_dims}")
-                self.model_params = neural_net.init_params(target_layer_dims)
-                self.model_layer_dims = target_layer_dims # Store the architecture
+                self._log_message(f"Creating new model with layers: {target_layer_dims}")
+                self.current_model = SimpleNeuralNetwork(target_layer_dims)
+                self.model_layer_dims = target_layer_dims
                 self.save_button.setEnabled(False) # Can't save until trained
-                self._log_message("Model parameters initialized.")
+                self._log_message("Model created successfully.")
             except Exception as e:
-                self._log_message(f"ERROR: Unexpected error initializing model parameters: {e}")
+                self._log_message(f"ERROR: Unexpected error creating model: {e}")
                 self.start_button.setEnabled(True)
                 self.stop_button.setEnabled(False)
                 self.progress_bar.setVisible(False)
-                self.model_params = None # Ensure params are None on error
+                self.current_model = None
                 self.model_layer_dims = None
                 return
-        # ----------------------------------------- #
 
-        # --- Threading Setup --- (Ensure model_params is not None before proceeding)
-        if self.model_params is None:
-            self._log_message("ERROR: Model parameters are not available for training.")
+        # --- Threading Setup ---
+        if self.current_model is None:
+            self._log_message("ERROR: Model is not available for training.")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             return
 
         self.training_thread = QThread()
         self.training_worker = TrainingWorker(
-            model=self.current_model, # Pass the model instance
+            model=self.current_model,
             X_train=self.X_train,
             Y_train=self.Y_train,
             X_dev=self.X_dev,
@@ -863,18 +861,14 @@ class MainWindow(QMainWindow):
         self.training_worker.moveToThread(self.training_thread)
 
         # --- Connect Signals and Slots ---
-        # Connect worker signals to main window slots
         self.training_worker.progress.connect(self._update_progress)
         self.training_worker.finished.connect(self._handle_training_finished)
         self.training_worker.log_message.connect(self._handle_worker_log)
 
-        # Connect thread signals
         self.training_thread.started.connect(self.training_worker.run)
         self.training_worker.finished.connect(self.training_thread.quit)
-        self.training_worker.finished.connect(self.training_worker.deleteLater) # Schedule worker for deletion
-        self.training_thread.finished.connect(self._cleanup_thread) # Connect thread finished to cleanup slot
-        # We handle UI cleanup in _cleanup_thread via _handle_training_finished/_handle_worker_error
-        # --- End Signal/Slot Connections --- 
+        self.training_worker.finished.connect(self.training_worker.deleteLater)
+        self.training_thread.finished.connect(self._cleanup_thread)
 
         # Start the thread
         self.training_thread.start()

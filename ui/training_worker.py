@@ -3,10 +3,9 @@
 from PyQt5.QtCore import QObject, pyqtSignal
 import numpy as np
 from typing import Dict, Any
-# Assuming neural_net is in the model directory relative to the main script
+# Import SimpleNeuralNetwork directly
 try:
-    # This relative import might work if ui_main is run directly and model is a sibling
-    from model import neural_net
+    from model.neural_net import SimpleNeuralNetwork
 except ImportError:
     # Fallback if the structure requires adding the parent directory
     import sys
@@ -16,14 +15,13 @@ except ImportError:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
     try:
-        from model import neural_net
+        from model.neural_net import SimpleNeuralNetwork
     except ImportError as e:
-        print(f"CRITICAL ERROR: Could not import neural_net in TrainingWorker: {e}")
-        # Define dummy functions if import fails to prevent NameError later
-        class DummyNeuralNet:
-            def gradient_descent(*args, **kwargs): return None
-        neural_net = DummyNeuralNet()
-
+        print(f"CRITICAL ERROR: Could not import SimpleNeuralNetwork in TrainingWorker: {e}")
+        # Define dummy class if import fails
+        class SimpleNeuralNetwork:
+            def __init__(self, *args, **kwargs): pass
+            def train(self, *args, **kwargs): return None
 
 # Worker class for handling training in a separate thread
 class TrainingWorker(QObject):
@@ -34,7 +32,7 @@ class TrainingWorker(QObject):
 
     # Removed error_occurred signal, will emit finished(None) on error instead for simplicity
 
-    def __init__(self, model: Any, X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray, Y_dev: np.ndarray, training_params: Dict[str, Any]):
+    def __init__(self, model: SimpleNeuralNetwork, X_train: np.ndarray, Y_train: np.ndarray, X_dev: np.ndarray, Y_dev: np.ndarray, training_params: Dict[str, Any]):
         super().__init__()
         self.model = model # Store the model object instance
         self.X_train = X_train
@@ -48,12 +46,9 @@ class TrainingWorker(QObject):
         """Signals the worker to stop training gracefully."""
         self.log_message.emit("Stop request received by worker.")
         self._is_running = False
-        # Try to signal the model's training loop if it supports it
+        # Signal the model's training loop if it supports it
         if hasattr(self.model, 'stop_training_flag'):
             self.model.stop_training_flag = True
-        # Fallback for old neural_net stop flag (can be removed after neural_net is class-based)
-        # elif 'neural_net' in globals() and hasattr(neural_net, 'stop_training_flag'):
-        #      neural_net.stop_training_flag = True
 
     def run(self):
         """Runs the gradient descent training."""
@@ -62,9 +57,6 @@ class TrainingWorker(QObject):
         # Reset stop flag on the model if possible
         if hasattr(self.model, 'stop_training_flag'):
             self.model.stop_training_flag = False
-        # Fallback for old neural_net stop flag (can be removed after neural_net is class-based)
-        # elif 'neural_net' in globals() and hasattr(neural_net, 'stop_training_flag'):
-        #      neural_net.stop_training_flag = False
 
         try:
             # Define the callback function to emit progress and check for stop request
@@ -79,22 +71,14 @@ class TrainingWorker(QObject):
                 self.progress.emit(percent_complete)
                 return True # Continue training
 
-            # --- Pass progress callback into training_params --- #
-            # Model's train method needs to know the name of the callback parameter
-            # Let's assume the interface specifies it as 'progress_callback'
+            # Pass progress callback into training_params
             self.training_params['progress_callback'] = progress_callback
-            # ------------------------------------------------- #
 
-            # --- Call the model's train method --- #
-            # The model's train method should handle its own parameters internally
-            # It receives training/dev data and hyperparameters via kwargs
-            # Expected return: Tuple[Any, List[float], List[float]] -> (final_params_or_state, loss_hist, val_acc_hist)
-            # The first element could be the updated params dict, or the model state itself if needed.
+            # Call the model's train method
             results_tuple = self.model.train(
                 self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-                **self.training_params # Unpack the dictionary as keyword arguments
+                **self.training_params
             )
-            # --------------------------------------- #
 
             if not self._is_running:
                  self.log_message.emit("Training stopped early by request.")
@@ -118,6 +102,3 @@ class TrainingWorker(QObject):
             # Reset stop flag on the model if possible
             if hasattr(self.model, 'stop_training_flag'):
                 self.model.stop_training_flag = False
-            # Fallback for old neural_net stop flag (can be removed after neural_net is class-based)
-            # elif 'neural_net' in globals() and hasattr(neural_net, 'stop_training_flag'):
-            #      neural_net.stop_training_flag = False
