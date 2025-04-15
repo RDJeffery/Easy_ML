@@ -539,9 +539,6 @@ def load_emoji_dataset(csv_path: str,
                        validation_split: Union[int, float] = 0.1) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], int, Optional[List[str]]]:
     """Loads emoji data from a CSV file.
 
-    Assumes the CSV has columns like 'name', 'codepoint', and columns for image providers (e.g., 'Google', 'Apple').
-    The specified image_column must contain base64 encoded image strings.
-
     Args:
         csv_path (str): Path to the emoji dataset CSV file.
         image_column (str): Name of the column containing base64 image strings (e.g., 'Google').
@@ -579,14 +576,23 @@ def load_emoji_dataset(csv_path: str,
         save_counter = 0 # Counter for saving debug images
         max_save = 5       # Max number of debug images to save
 
+        # Track class counts for balance reporting
+        class_counts: Dict[str, int] = {}
+
         for index, row in df_filtered.iterrows():
             base64_str = row[image_column]
             name = row['name']
             img_vector = process_image_from_base64(base64_str)
             if img_vector is not None:
+                # Verify normalization
+                if not (0 <= img_vector.min() <= img_vector.max() <= 1.0):
+                    print(f"Warning: Image {index} not properly normalized. Normalizing now.", file=sys.stderr)
+                    img_vector = img_vector / 255.0
+                
                 all_X_data.append(img_vector)
                 all_Y_names.append(name)
                 processed_indices.append(index)
+                class_counts[name] = class_counts.get(name, 0) + 1
 
                 # --- Debug: Save processed image --- #
                 if save_counter < max_save:
@@ -612,6 +618,11 @@ def load_emoji_dataset(csv_path: str,
             print("Error: No emoji images could be processed.", file=sys.stderr)
             return None, None, None, None, 0, None
 
+        # Report class balance
+        print(f"Class distribution in emoji dataset:", file=sys.stderr)
+        for name, count in sorted(class_counts.items()):
+            print(f"  {name}: {count} samples", file=sys.stderr)
+
         # --- Create Label Mapping from Names --- #
         unique_names = sorted(list(set(all_Y_names)))
         num_classes = len(unique_names)
@@ -623,8 +634,20 @@ def load_emoji_dataset(csv_path: str,
 
         X_combined_flat = np.array(all_X_data) # Shape (num_samples, 784)
 
+        # Verify final data shape and normalization
+        if X_combined_flat.shape[1] != 784:
+            print(f"Error: Expected 784 features per sample, got {X_combined_flat.shape[1]}", file=sys.stderr)
+            return None, None, None, None, 0, None
+
+        if not (0 <= X_combined_flat.min() <= X_combined_flat.max() <= 1.0):
+            print("Warning: Final data not properly normalized. Normalizing now.", file=sys.stderr)
+            X_combined_flat = X_combined_flat / 255.0
+
         # Shuffle and split
         X_train, Y_train, X_dev, Y_dev = _reshape_and_split_data(X_combined_flat, Y_labels, validation_split)
+
+        # Report final split sizes
+        print(f"Final split sizes - Train: {X_train.shape[1]}, Dev: {X_dev.shape[1]}", file=sys.stderr)
 
         return X_train, Y_train, X_dev, Y_dev, num_classes, class_names
 
