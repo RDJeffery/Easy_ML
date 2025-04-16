@@ -16,8 +16,8 @@ class DrawingCanvas(QWidget):
         self.image.fill(Qt.black)
         self.drawing = False
         self.last_point = QPoint()
-        # Thicker pen for easier drawing
-        self.pen = QPen(Qt.white, 15, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        # Make pen thinner to better match QuickDraw data style
+        self.pen = QPen(Qt.white, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -67,16 +67,13 @@ class DrawingCanvas(QWidget):
             img_array = np.array(pil_img_resized)
 
             # Check if the image is mostly black (or empty)
-            if np.mean(img_array) < 10: # Threshold to avoid predicting empty canvas
-                 print("Warning: Drawing canvas appears empty.")
-                 return None
+            if np.mean(img_array) < 5:
+                print("Warning: Drawing canvas appears empty.")
+                return None
 
-            img_normalized = img_array.astype(float) / 255.0
-
-            # Reshape for the neural network (features, 1 sample)
-            img_vector = img_normalized.reshape(target_size[0] * target_size[1], 1)
-
-            return img_vector
+            # Return the raw 2D numpy array (uint8)
+            # Normalization and reshaping should happen in the caller
+            return img_array
         except Exception as e:
             print(f"Error processing drawing: {e}")
             return None

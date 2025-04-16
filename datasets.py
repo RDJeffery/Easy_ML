@@ -45,20 +45,46 @@ def _reshape_and_split_data(X_combined: np.ndarray, Y_labels: np.ndarray,
 
     Returns:
         tuple: (X_train, Y_train, X_dev, Y_dev)
-               Feature shapes depend on return_shape.
+               Feature shapes depend on return_shape. Returns appropriately shaped empty arrays on error or empty input.
     """
-    X_train, Y_train, X_dev, Y_dev = None, None, None, None # Initialize return vars
+    # Determine default feature count/shape for empty arrays
+    default_feature_count = 0
+    if X_combined.ndim > 1:
+        # Prioritize img_dims if reshaping to image
+        if return_shape == 'image' and img_dims:
+            default_feature_count = -1 # Indicate image shape needed using img_dims
+        # Handle flattened target shape
+        elif return_shape == 'flattened':
+            if X_combined.ndim == 4 and img_dims: # Input is image, target is flat
+                default_feature_count = img_dims[0] * img_dims[1] * img_dims[2]
+            elif X_combined.ndim == 2: # Input is flat, target is flat
+                default_feature_count = X_combined.shape[1]
+        # Fallbacks based only on input dimension if target shape logic didn't apply
+        elif X_combined.ndim == 4 and img_dims: # Input is image, but target wasn't 'flattened' or 'image'
+             default_feature_count = img_dims[0] * img_dims[1] * img_dims[2]
+        elif X_combined.ndim == 2: # Input is flat, target wasn't 'flattened' or 'image'
+            default_feature_count = X_combined.shape[1]
+
+    # Initialize with default empty shapes based on target return_shape
+    dtype = X_combined.dtype if X_combined.size > 0 else np.float32 # Use input dtype or default
+    if return_shape == 'image' and img_dims:
+        empty_shape = (0, img_dims[0], img_dims[1], img_dims[2])
+        X_train = np.empty(empty_shape, dtype=dtype)
+        X_dev = np.empty(empty_shape, dtype=dtype)
+    else: # Default to flattened (features, samples) or handle unknown shape
+        # Use determined default_feature_count; fallback to 0 if needed
+        f_count = default_feature_count if default_feature_count > 0 else 0
+        X_train = np.empty((f_count, 0), dtype=dtype)
+        X_dev = np.empty((f_count, 0), dtype=dtype)
+
+    Y_train = np.array([], dtype=int)
+    Y_dev = np.array([], dtype=int)
 
     num_samples = X_combined.shape[0]
     if num_samples == 0:
         print("Warning: No samples to split.", file=sys.stderr)
-        if return_shape == 'image' and img_dims:
-            empty_features = np.empty((0, img_dims[0], img_dims[1], img_dims[2]), dtype=X_combined.dtype)
-        else:
-            feature_count = X_combined.shape[1] if X_combined.ndim > 1 else 0
-            empty_features = np.empty((feature_count, 0), dtype=X_combined.dtype)
-        empty_labels = np.array([], dtype=int)
-        return empty_features, empty_labels, empty_features, empty_labels
+        # Already initialized with empty arrays, just return
+        return X_train, Y_train, X_dev, Y_dev
 
     # --- Shuffle --- #
     permutation = np.random.permutation(num_samples)
@@ -69,30 +95,23 @@ def _reshape_and_split_data(X_combined: np.ndarray, Y_labels: np.ndarray,
     split_idx: int
     if isinstance(validation_split, float) and 0 < validation_split < 1:
         split_idx = int(num_samples * (1.0 - validation_split))
-        # print(f"Using validation split fraction: {validation_split:.2f}", file=sys.stderr)
     elif isinstance(validation_split, int) and 1 <= validation_split < num_samples:
         split_idx = num_samples - validation_split
-        # print(f"Using fixed validation split size: {validation_split}", file=sys.stderr)
     else:
-        split_val = 1000
-        if num_samples <= split_val * 2:
-            split_val = max(1, int(num_samples * 0.1))
-            # print(f"Warning: Invalid or large validation_split value. Using 10% ({split_val} samples).", file=sys.stderr)
-        # else:
-            # print(f"Warning: Invalid validation_split value. Using default ({split_val} samples).", file=sys.stderr)
+        # Fallback split value (e.g., 10% or 1000, whichever is smaller and feasible)
+        split_val = min(1000, max(1, int(num_samples * 0.1)))
+        if num_samples <= split_val: # Avoid validation set larger than training set
+             split_val = max(1, num_samples // 2) if num_samples > 1 else 0
+        print(f"Warning: Invalid validation_split value ({validation_split}). Using fallback: {split_val} samples.", file=sys.stderr)
         split_idx = num_samples - split_val
 
     # --- Split Data --- #
+    X_train_split, X_dev_split = None, None # Initialize split vars
     if num_samples < 2 or split_idx <= 0 or split_idx >= num_samples:
-        print(f"Warning: Not enough samples ({num_samples}) for a validation split. Using all for training.", file=sys.stderr)
+        print(f"Warning: Not enough samples ({num_samples}) or invalid split ({split_idx}) for validation. Using all for training.", file=sys.stderr)
         X_train_split = X_shuffled
         Y_train = Y_shuffled
-        if return_shape == 'image' and img_dims:
-             X_dev_split = np.empty((0, img_dims[0], img_dims[1], img_dims[2]), dtype=X_combined.dtype)
-        else:
-             feature_count = X_combined.shape[1] if X_combined.ndim > 1 else 0
-             X_dev_split = np.empty((0, feature_count), dtype=X_combined.dtype)
-        Y_dev = np.array([], dtype=int)
+        # Keep X_dev_split as None, Y_dev is already empty []
     else:
         X_train_split = X_shuffled[:split_idx]
         Y_train = Y_shuffled[:split_idx]
@@ -102,94 +121,115 @@ def _reshape_and_split_data(X_combined: np.ndarray, Y_labels: np.ndarray,
     # --- Reshape Based on return_shape --- #
     reshape_error = False # Flag to track errors during reshaping
 
-    if return_shape == 'image':
-        print(f"Reshaping data to 'image' format...", file=sys.stderr)
-        if X_train_split.ndim == 4:
-            X_train = X_train_split
-            X_dev = X_dev_split
-            print(f"  Input data already has {X_train_split.ndim} dimensions. Assuming (samples, H, W, C).", file=sys.stderr)
-        elif X_train_split.ndim == 2 and img_dims:
-            num_features = X_train_split.shape[1]
-            expected_features = img_dims[0] * img_dims[1] * img_dims[2]
-            if num_features != expected_features:
-                print(f"Error: Cannot reshape to image. Expected {expected_features} features for shape {img_dims}, but got {num_features}.", file=sys.stderr)
-                reshape_error = True
-            else:
-                target_shape_train = (X_train_split.shape[0], img_dims[0], img_dims[1], img_dims[2])
-                target_shape_dev = (X_dev_split.shape[0], img_dims[0], img_dims[1], img_dims[2])
-                try:
-                    X_train = X_train_split.reshape(target_shape_train)
-                    X_dev = X_dev_split.reshape(target_shape_dev)
-                    print(f"  Reshaped flattened data to {target_shape_train} and {target_shape_dev}.", file=sys.stderr)
-                except ValueError as e:
-                    print(f"Error reshaping training data to image format: {e}", file=sys.stderr)
-                    reshape_error = True
-        else:
-            print(f"Error: Cannot reshape to image. Input data has {X_train_split.ndim} dimensions or img_dims not provided.", file=sys.stderr)
-            reshape_error = True
-        # Handle reshape error for image format
-        if reshape_error:
-             if img_dims:
-                 empty_img = np.empty((0, img_dims[0], img_dims[1], img_dims[2]), dtype=X_combined.dtype)
-                 X_train, X_dev = empty_img, empty_img
-             else:
-                 print("  FATAL: Cannot provide empty image array due to missing img_dims.", file=sys.stderr)
-                 empty_features = np.empty((0,0), dtype=X_combined.dtype)
-                 X_train, X_dev = empty_features, empty_features
+    try: # Wrap reshaping in a try block for cleaner error handling
+        if return_shape == 'image':
+            # print(f"Reshaping data to 'image' format...", file=sys.stderr) # Verbose
+            if not img_dims:
+                 print(f"Error: Cannot reshape to image. img_dims not provided.", file=sys.stderr)
+                 reshape_error = True
+            elif X_train_split is not None and X_train_split.ndim == 4:
+                 # Input is already image format (samples, H, W, C)
+                 X_train = X_train_split
+                 if X_dev_split is not None: X_dev = X_dev_split
+                 # print(f"  Input data already has {X_train_split.ndim} dimensions. Shape: {X_train.shape}", file=sys.stderr) # Verbose
+            elif X_train_split is not None and X_train_split.ndim == 2:
+                 # Input is flattened (samples, features), reshape to (samples, H, W, C)
+                 num_features = X_train_split.shape[1]
+                 expected_features = img_dims[0] * img_dims[1] * img_dims[2]
+                 if num_features != expected_features:
+                      print(f"Error: Cannot reshape to image. Expected {expected_features} features for shape {img_dims}, but got {num_features}.", file=sys.stderr)
+                      reshape_error = True
+                 else:
+                      target_shape_train = (X_train_split.shape[0], img_dims[0], img_dims[1], img_dims[2])
+                      X_train = X_train_split.reshape(target_shape_train)
+                      if X_dev_split is not None and X_dev_split.size > 0:
+                          target_shape_dev = (X_dev_split.shape[0], img_dims[0], img_dims[1], img_dims[2])
+                          X_dev = X_dev_split.reshape(target_shape_dev)
+                      # else: X_dev remains empty image shape from init
+                      # print(f"  Reshaped flattened data to {target_shape_train} and {X_dev.shape}.", file=sys.stderr) # Verbose
+            elif X_train_split is not None: # Check needed if split failed
+                 print(f"Error: Cannot reshape to image. Input data has unexpected {X_train_split.ndim} dimensions.", file=sys.stderr)
+                 reshape_error = True
+            # else: X_train_split is None (split failed), error state handled below
 
-    elif return_shape == 'flattened':
-        print("Reshaping data to 'flattened' format (features, samples)...", file=sys.stderr)
-        if X_train_split.ndim == 4:
-            num_train_samples = X_train_split.shape[0]
-            num_dev_samples = X_dev_split.shape[0]
-            num_features = X_train_split.shape[1] * X_train_split.shape[2] * X_train_split.shape[3]
-            X_train = X_train_split.reshape(num_train_samples, num_features).T
-            X_dev = X_dev_split.reshape(num_dev_samples, num_features).T
-            print(f"  Flattened image data to ({num_features}, {num_train_samples}) and ({num_features}, {num_dev_samples}).", file=sys.stderr)
-        elif X_train_split.ndim == 2:
-            X_train = X_train_split.T
-            X_dev = X_dev_split.T
-            print(f"  Transposed flattened data.", file=sys.stderr)
-        else:
-            print(f"Error: Cannot flatten. Input data has {X_train_split.ndim} dimensions.", file=sys.stderr)
-            reshape_error = True
-        # Handle reshape error for flattened format
-        if reshape_error:
-             feature_count = X_train_split.shape[1] if X_train_split.ndim == 2 else 0
-             X_train = np.empty((feature_count, 0), dtype=X_combined.dtype)
-             X_dev = np.empty((feature_count, 0), dtype=X_combined.dtype)
-             print(f"  Falling back to empty flattened arrays.", file=sys.stderr)
+        elif return_shape == 'flattened':
+            # print("Reshaping data to 'flattened' format (features, samples)...", file=sys.stderr) # Verbose
+            if X_train_split is not None and X_train_split.ndim == 4:
+                 # Input is image (samples, H, W, C), flatten to (features, samples)
+                 num_train_samples = X_train_split.shape[0]
+                 num_features = X_train_split.shape[1] * X_train_split.shape[2] * X_train_split.shape[3]
+                 X_train = X_train_split.reshape(num_train_samples, num_features).T
+                 if X_dev_split is not None and X_dev_split.size > 0:
+                     num_dev_samples = X_dev_split.shape[0]
+                     X_dev = X_dev_split.reshape(num_dev_samples, num_features).T
+                 # else: X_dev remains empty flattened shape from init
+                 # print(f"  Flattened image data to {X_train.shape} and {X_dev.shape}.", file=sys.stderr) # Verbose
+            elif X_train_split is not None and X_train_split.ndim == 2:
+                 # Input is already flattened (samples, features), transpose to (features, samples)
+                 X_train = X_train_split.T
+                 if X_dev_split is not None and X_dev_split.size > 0:
+                     X_dev = X_dev_split.T
+                 # else: X_dev remains empty flattened shape from init
+                 # print(f"  Transposed flattened data. Shape: {X_train.shape}", file=sys.stderr) # Verbose
+            elif X_train_split is not None: # Check needed if split failed
+                 print(f"Error: Cannot flatten. Input data has unexpected {X_train_split.ndim} dimensions.", file=sys.stderr)
+                 reshape_error = True
+            # else: X_train_split is None (split failed), error state handled below
 
-    else: # Unknown return_shape
-        print(f"Error: Unknown return_shape '{return_shape}'. Defaulting to flattened (transposed).", file=sys.stderr)
-        if X_train_split.ndim == 2:
-            X_train = X_train_split.T
-            X_dev = X_dev_split.T
-        else:
-            feature_count = 0
-            X_train = np.empty((feature_count, 0), dtype=X_combined.dtype)
-            X_dev = np.empty((feature_count, 0), dtype=X_combined.dtype)
+        else: # Unknown return_shape
+            print(f"Error: Unknown return_shape '{return_shape}'. Defaulting to flattened (transposed).", file=sys.stderr)
+            if X_train_split is not None and X_train_split.ndim == 2: # Attempt transpose as fallback
+                 X_train = X_train_split.T
+                 if X_dev_split is not None and X_dev_split.size > 0:
+                     X_dev = X_dev_split.T
+            elif X_train_split is not None: # Cannot determine shape
+                 reshape_error = True # Mark error to trigger reset below
+            # else: X_train_split is None (split failed), error state handled below
 
-    # --- Ensure float32 type --- #
+    except ValueError as e:
+        print(f"Error during reshape operation: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr) # Add traceback for debug
+        reshape_error = True
+
+    # If reshape error occurred OR if the initial split failed (X_train_split is None),
+    # reset X_train/X_dev to initial empty arrays matching target shape
+    if reshape_error or X_train_split is None:
+         if X_train_split is not None: # Only print reset message if error happened *after* split
+             print("  Resetting X arrays to empty due to reshape error.", file=sys.stderr)
+         # Re-initialize based on target shape, same as initial block
+         if return_shape == 'image' and img_dims:
+             empty_shape = (0, img_dims[0], img_dims[1], img_dims[2])
+             X_train = np.empty(empty_shape, dtype=dtype)
+             X_dev = np.empty(empty_shape, dtype=dtype)
+         else: # Default to flattened (features, samples)
+             # Try to determine feature count more robustly for empty array
+             f_count = 0
+             if default_feature_count > 0:
+                  f_count = default_feature_count
+             elif X_combined.ndim == 2: # Fallback from original combined data
+                  f_count = X_combined.shape[1]
+             elif X_combined.ndim == 4 and img_dims: # Fallback from original combined data
+                  f_count = img_dims[0] * img_dims[1] * img_dims[2]
+
+             X_train = np.empty((f_count, 0), dtype=dtype)
+             X_dev = np.empty((f_count, 0), dtype=dtype)
+
+
+    # --- Ensure float32 type for features (often needed by models) --- #
     if X_train is not None and X_train.dtype != np.float32:
         X_train = X_train.astype(np.float32)
     if X_dev is not None and X_dev.dtype != np.float32:
         X_dev = X_dev.astype(np.float32)
 
-    print(f"Final Shapes: X_train={X_train.shape if X_train is not None else 'None'}, Y_train={Y_train.shape}, X_dev={X_dev.shape if X_dev is not None else 'None'}, Y_dev={Y_dev.shape}", file=sys.stderr)
+    # --- Final Check and Print --- #
+    # Ensure Y arrays are numpy arrays even if split failed
+    if not isinstance(Y_train, np.ndarray): Y_train = np.array(Y_train, dtype=int)
+    if not isinstance(Y_dev, np.ndarray): Y_dev = np.array(Y_dev, dtype=int)
 
-    # --- Final Return --- #
-    # Ensure all return variables are assigned, even if empty from errors
-    if X_train is None: # Handle cases where reshape failed catastrophically
-         if return_shape == 'image' and img_dims:
-              X_train = np.empty((0, img_dims[0], img_dims[1], img_dims[2]), dtype=X_combined.dtype)
-              X_dev = np.empty((0, img_dims[0], img_dims[1], img_dims[2]), dtype=X_combined.dtype)
-         else:
-              feature_count = X_combined.shape[1] if X_combined.ndim > 1 else 0
-              X_train = np.empty((feature_count, 0), dtype=X_combined.dtype)
-              X_dev = np.empty((feature_count, 0), dtype=X_combined.dtype)
+    # print(f"Final Shapes: X_train={X_train.shape}, Y_train={Y_train.shape}, X_dev={X_dev.shape}, Y_dev={Y_dev.shape}", file=sys.stderr) # Verbose
 
     return X_train, Y_train, X_dev, Y_dev
+
 
 # --- Main Data Loaders --- #
 
@@ -441,18 +481,30 @@ def load_emoji_dataset(csv_path: str,
 
     try:
         df = pd.read_csv(csv_path)
-        if image_column not in df.columns:
-            print(f"Error: Specified image_column '{image_column}' not found in CSV.", file=sys.stderr)
+        # Convert image column name from input to lowercase for comparison
+        image_column_lower = image_column.strip().lower()
+
+        # Normalize DataFrame columns to lowercase stripped strings for robust checking
+        original_columns = list(df.columns)
+        df.columns = [col.strip().lower() for col in df.columns]
+        normalized_columns = list(df.columns)
+
+        # Check using lowercase names
+        if image_column_lower not in df.columns:
+            print(f"Error: Specified image_column '{image_column}' (normalized to '{image_column_lower}') not found in CSV columns: {normalized_columns}.", file=sys.stderr)
             return None, None, None, None, 0, None
-        if 'Name' not in df.columns:
-            print(f"Error: Required 'Name' column not found in CSV.", file=sys.stderr)
+        # Check for 'name' (lowercase)
+        if 'name' not in df.columns:
+            print(f"Error: Required 'name' column not found in CSV columns: {normalized_columns}.", file=sys.stderr)
             return None, None, None, None, 0, None
 
-        df_filtered = df.dropna(subset=[image_column, 'Name'])
+        # Drop NA using lowercase column names
+        df_filtered = df.dropna(subset=[image_column_lower, 'name'])
         num_samples_original = len(df)
         num_samples_filtered = len(df_filtered)
         if num_samples_filtered < num_samples_original:
-            print(f"  Warning: Dropped {num_samples_original - num_samples_filtered} rows due to missing values in '{image_column}' or 'Name'.", file=sys.stderr)
+            # Use original input image_column for user message
+            print(f"  Warning: Dropped {num_samples_original - num_samples_filtered} rows due to missing values in '{image_column}' or 'name'.", file=sys.stderr)
 
         if num_samples_filtered == 0:
             print(f"Error: No valid samples found after filtering for column '{image_column}'.", file=sys.stderr)
@@ -463,8 +515,9 @@ def load_emoji_dataset(csv_path: str,
         img_dims = (28, 28, 1) # Assume processing yields 28x28 grayscale
 
         for index, row in df_filtered.iterrows():
-            base64_str = row[image_column]
-            name = row['Name']
+            # Access using lowercase column names
+            base64_str = row[image_column_lower]
+            name = row['name']
             img_vector = process_image_from_base64(base64_str)
             if img_vector is not None:
                 all_X_data.append(img_vector)

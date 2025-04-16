@@ -93,21 +93,23 @@ class TrainingWorker(QObject):
             self.finished.emit(None)
             return
 
-        history_data = None # To store final history dictionary
+        results_to_emit = None # To store results to be emitted
 
         try:
             # --- Select Training Path Based on Model Type --- #
 
             if self.model_type == "Simple NN":
                 self.log_message.emit("Starting Simple NN training (using gradient_descent)...")
-                # Define the callback for Simple NN
-                def simple_nn_callback(epoch, total_epochs, train_loss, val_acc):
+                # Get total epochs for the callback
+                total_epochs = self.params.get('epochs', 10)
+                def simple_nn_callback(epoch, _total_epochs_ignored, train_loss, val_acc):
                     if not self._is_running:
                         self.log_message.emit("Stop detected during Simple NN training.")
                         return False # Signal gradient_descent to stop
                     # Emit progress (use NaN or None if values are missing)
                     loss_val = float(train_loss) if train_loss is not None else np.nan
                     acc_val = float(val_acc) if val_acc is not None else np.nan
+                    # Pass the extracted total_epochs to the progress signal
                     self.progress.emit(epoch, total_epochs, loss_val, acc_val)
                     QTimer.singleShot(0, lambda: None) # Yield to event loop
                     return True # Continue training
@@ -115,53 +117,86 @@ class TrainingWorker(QObject):
                 # Prepare params specific to SimpleNN gradient_descent
                 gd_params = {
                     'alpha': self.params.get('learning_rate', 0.01),
-                    'epochs': self.epochs,
-                    'batch_size': self.params.get('batch_size', 64),
-                    'activation': self.params.get('activation', 'relu'),
+                    'epochs': total_epochs, # Use extracted epochs
+                    'hidden_activation': self.params.get('activation', 'relu'),
                     'optimizer_name': self.params.get('optimizer', 'adam'),
                     'l2_lambda': self.params.get('l2_lambda', 0.0),
-                    'dropout_keep_prob': self.params.get('dropout_keep_prob', 1.0),
+                    # NN uses keep_prob, CNN uses dropout_rate (1-keep_prob)
+                    'dropout_keep_prob': 1.0 - self.params.get('dropout_rate', 0.0),
                     'patience': self.params.get('patience', 0),
                     'progress_callback': simple_nn_callback
                 }
-                self.log_message.emit(f"Simple NN Params: { {k:v for k,v in gd_params.items() if k != 'progress_callback'} }")
+                # Create params string for logging outside the f-string
+                params_log_str = str({k:v for k,v in gd_params.items() if k != 'progress_callback'})
+                self.log_message.emit(f"Simple NN Params: {params_log_str}")
 
-                # Ensure the model has the gradient_descent method
-                if not hasattr(self.model, 'gradient_descent'):
-                     raise AttributeError("Simple NN model object does not have 'gradient_descent' method.")
-
-                # Call gradient descent
-                results_tuple = self.model.gradient_descent(
+                # Call the correct training method ('train')
+                results_tuple = self.model.train(
                     self.X_train, self.Y_train, self.X_dev, self.Y_dev,
                     **gd_params
                 )
 
                 if results_tuple is not None:
                     # Expecting (final_params, train_loss_hist, val_acc_hist)
-                    _, train_loss_hist, val_acc_hist = results_tuple
-                    # Construct a history dict compatible with Keras format if possible
-                    history_data = {
-                        'loss': train_loss_hist,
-                        'val_accuracy': val_acc_hist # Assuming accuracy is returned
-                        # Add other metrics if available
-                    }
-                # Final parameters are implicitly stored within self.model object now
+                    # Store the full tuple to be emitted
+                    results_to_emit = results_tuple
+                else:
+                    results_to_emit = None # Training might have been stopped
 
             elif self.model_type == "CNN":
                 self.log_message.emit("Starting CNN training (using Keras model.fit)...")
 
-                # Keras fit blocks, so we get history at the end.
-                # We cannot easily emit progress per epoch without callbacks.
-                # TODO: Implement Keras callbacks for better progress reporting and stopping.
+                # Get necessary parameters for Keras training
+                keras_epochs = self.params.get('epochs', 10)
+                keras_batch_size = self.params.get('batch_size', 32)
+                keras_learning_rate = self.params.get('learning_rate', 0.001)
+                keras_patience = self.params.get('patience', 0)
+
+                # TODO: Implement Keras callbacks for better progress reporting and stopping
+                callbacks = []
+                if keras_patience > 0:
+                    early_stopping = tf.keras.callbacks.EarlyStopping(
+                        monitor='val_accuracy', # or 'val_loss'
+                        patience=keras_patience,
+                        verbose=1,
+                        restore_best_weights=True # Restore weights from the best epoch
+                    )
+                    callbacks.append(early_stopping)
+                    self.log_message.emit(f"Enabled Keras EarlyStopping with patience={keras_patience}")
+
+                # Callback to emit progress (simplified version)
+                class ProgressCallback(tf.keras.callbacks.Callback):
+                    def __init__(self, worker):
+                        super().__init__()
+                        self.worker = worker
+
+                    def on_epoch_end(self, epoch, logs=None):
+                        if not self.worker._is_running:
+                            self.model.stop_training = True
+                            self.worker.log_message.emit("Stop detected during Keras epoch.")
+                            return
+
+                        logs = logs or {}
+                        loss = logs.get('loss', np.nan)
+                        # Handle potential key differences for validation accuracy
+                        acc_key = 'val_accuracy' if 'val_accuracy' in logs else 'val_acc'
+                        val_acc = logs.get(acc_key, np.nan)
+                        # Epoch is 0-based from Keras, emit 1-based
+                        self.worker.progress.emit(epoch + 1, self.worker.params.get('epochs', 10), loss, val_acc)
+                        QTimer.singleShot(0, lambda: None) # Yield
+
+                callbacks.append(ProgressCallback(self))
 
                 # Prepare params for Keras model.train method
                 keras_params = {
-                    'epochs': self.epochs,
-                    'batch_size': self.params.get('batch_size', 32),
-                    'learning_rate': self.params.get('learning_rate', 0.001)
+                    'epochs': keras_epochs,
+                    'batch_size': keras_batch_size,
+                    'learning_rate': keras_learning_rate,
+                    'callbacks': callbacks # Pass the callbacks list
                     # Keras handles optimizer/loss internally during compile (called in model.train)
                 }
-                self.log_message.emit(f"Keras Params: {keras_params}")
+                params_log_str = str(keras_params)
+                self.log_message.emit(f"Keras Params: {params_log_str}")
 
                 # Ensure the model has the train method
                 if not hasattr(self.model, 'train'):
@@ -174,19 +209,25 @@ class TrainingWorker(QObject):
                 )
 
                 if keras_history and hasattr(keras_history, 'history'):
-                    history_data = keras_history.history
-                    # Emit progress based on the final history data
-                    if 'loss' in history_data and 'val_accuracy' in history_data:
-                        num_epochs_trained = len(history_data['loss'])
+                    # For Keras, the result *is* the history dictionary
+                    # We don't get parameters back directly from fit
+                    # MainWindow will need to handle getting params from self.current_model if needed
+                    results_to_emit = keras_history.history
+                    # Emit progress based on the final history data (Optional refinement)
+                    if 'loss' in results_to_emit and 'val_accuracy' in results_to_emit:
+                        num_epochs_trained = len(results_to_emit['loss'])
                         for i in range(num_epochs_trained):
                             if not self._is_running: break # Check stop flag between emits
-                            loss_val = history_data['loss'][i]
-                            acc_val = history_data['val_accuracy'][i]
-                            self.progress.emit(i, self.epochs, loss_val, acc_val)
+                            loss_val = results_to_emit['loss'][i]
+                            # Handle potential key differences (e.g., 'val_acc' vs 'val_accuracy')
+                            acc_key = 'val_accuracy' if 'val_accuracy' in results_to_emit else 'val_acc'
+                            acc_val = results_to_emit.get(acc_key, [np.nan])[i]
+                            self.progress.emit(i + 1, self.epochs, loss_val, acc_val) # Emit epoch 1-based
                             QTimer.singleShot(0, lambda: None) # Yield
                             time.sleep(0.01) # Small sleep to allow UI updates
                 else:
                     self.log_message.emit("Keras training finished but returned no history.")
+                    results_to_emit = None
 
             else:
                 raise ValueError(f"Unknown model type encountered: {self.model_type}")
@@ -195,12 +236,12 @@ class TrainingWorker(QObject):
             if not self._is_running:
                  self.log_message.emit("Training stopped early by request.")
                  self.finished.emit(None) # Signal completion without results
-            elif history_data is None:
-                 self.log_message.emit("Training finished, but no history data was generated.")
+            elif results_to_emit is None:
+                 self.log_message.emit("Training finished, but no results were generated/returned.")
                  self.finished.emit(None)
             else:
                 self.log_message.emit("Training completed successfully.")
-                self.finished.emit(history_data) # Emit the history dictionary
+                self.finished.emit(results_to_emit) # Emit the results (tuple for SimpleNN, dict for CNN)
 
         except Exception as e:
             error_msg = f"CRITICAL Error during training: {e}"

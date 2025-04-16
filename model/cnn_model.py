@@ -45,7 +45,7 @@ class CNNModel:
         print("CNN model built:")
         self.model.summary() # Print model summary to console
 
-    def train(self, X_train, Y_train, X_val, Y_val, epochs=10, batch_size=32, learning_rate=0.001):
+    def train(self, X_train, Y_train, X_val, Y_val, epochs=10, batch_size=32, learning_rate=0.001, callbacks=None):
         """
         Compiles and trains the Keras model.
 
@@ -57,6 +57,7 @@ class CNNModel:
             epochs (int): Number of training epochs.
             batch_size (int): Batch size for training.
             learning_rate (float): Learning rate for the optimizer.
+            callbacks (list, optional): List of Keras callbacks to use during training.
         """
         if self.model is None:
             print("Error: Model not built yet. Call build_model() first.")
@@ -74,11 +75,15 @@ class CNNModel:
 
         # TODO: Add callbacks? (e.g., EarlyStopping, ModelCheckpoint)
 
+        # Use the callbacks passed in argument, default to empty list if None
+        callbacks_to_use = callbacks if callbacks is not None else []
+
         # Train the model
         history = self.model.fit(X_train, Y_train,
                                  batch_size=batch_size,
                                  epochs=epochs,
-                                 validation_data=(X_val, Y_val))
+                                 validation_data=(X_val, Y_val),
+                                 callbacks=callbacks_to_use)
 
         print("CNN training finished.")
         # You might want to return the history object for plotting later
