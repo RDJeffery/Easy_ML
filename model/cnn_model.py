@@ -1,9 +1,9 @@
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers
+from tensorflow.keras import layers, Sequential
 import numpy as np
 import traceback
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import Callback
 import sys
@@ -72,48 +72,86 @@ class CNNModel:
     """
     A Convolutional Neural Network model using tf.keras.
     """
-    def __init__(self, input_shape, num_classes):
+    def __init__(self, input_shape, num_classes, use_batch_norm=False, use_data_augmentation=False):
         """
         Initializes the CNNModel.
 
         Args:
             input_shape (tuple): The shape of the input images (e.g., (28, 28, 1) or (32, 32, 3)).
             num_classes (int): The number of output classes.
+            use_batch_norm (bool): Whether to include Batch Normalization layers. Defaults to False.
+            use_data_augmentation (bool): Whether to include data augmentation layers. Defaults to False.
         """
         self.input_shape = input_shape
         self.num_classes = num_classes
         self.model = None # Keras model will be stored here
-        print(f"CNNModel initialized with input shape: {self.input_shape} and num_classes: {self.num_classes}")
+        self.use_batch_norm = use_batch_norm
+        self.use_data_augmentation = use_data_augmentation
+        print(f"CNNModel initialized with input shape: {self.input_shape}, num_classes: {self.num_classes}, Batch Norm: {use_batch_norm}, Data Aug: {use_data_augmentation}")
 
     def build_model(self):
         """
         Builds the Keras Sequential model architecture.
-        This uses a simple Conv->Pool->Conv->Pool->Flatten->Dense structure.
+        Optionally includes Data Augmentation and Batch Normalization layers.
         """
-        print("Building CNN model...")
-        self.model = keras.Sequential(
-            [
-                keras.Input(shape=self.input_shape, name="input_layer"),
-                # Convolutional Block 1
-                layers.Conv2D(32, kernel_size=(3, 3), activation="relu", name="conv1"),
-                layers.MaxPooling2D(pool_size=(2, 2), name="pool1"),
-                # Convolutional Block 2
-                layers.Conv2D(64, kernel_size=(3, 3), activation="relu", name="conv2"),
-                layers.MaxPooling2D(pool_size=(2, 2), name="pool2"),
-                # Flatten and Dense Layers
-                layers.Flatten(name="flatten"),
-                layers.Dropout(0.5, name="dropout"), # Add dropout for regularization
-                layers.Dense(128, activation="relu", name="dense1"),
-                layers.Dense(self.num_classes, activation="softmax", name="output_layer"),
-            ],
-            name="cnn_model" # Give the overall model a name
-        )
+        print(f"Building CNN model (Batch Norm: {self.use_batch_norm}, Data Aug: {self.use_data_augmentation})...")
+        
+        model_layers = [
+            keras.Input(shape=self.input_shape, name="input_layer")
+        ]
+        
+        # --- Optional Data Augmentation Block ---
+        if self.use_data_augmentation:
+            print("  Adding Data Augmentation layers...")
+            # Create a sequential block for augmentation
+            # These layers are only active during training
+            data_augmentation = Sequential(
+                [
+                    # Use layers directly, not via preprocessing
+                    layers.RandomFlip("horizontal", input_shape=self.input_shape),
+                    layers.RandomRotation(0.1),
+                    layers.RandomZoom(0.1),
+                    layers.RandomContrast(0.1),
+                    # Add more augmentation as needed (e.g., layers.RandomTranslation)
+                ],
+                name="data_augmentation",
+            )
+            model_layers.append(data_augmentation)
+        # ---------------------------------------
+
+        # --- Convolutional Block 1 ---
+        model_layers.append(layers.Conv2D(32, kernel_size=(3, 3), name="conv1"))
+        if self.use_batch_norm:
+            model_layers.append(layers.BatchNormalization(name="bn1"))
+        model_layers.append(layers.Activation("relu", name="relu1"))
+        model_layers.append(layers.MaxPooling2D(pool_size=(2, 2), name="pool1"))
+        
+        # --- Convolutional Block 2 ---
+        model_layers.append(layers.Conv2D(64, kernel_size=(3, 3), name="conv2"))
+        if self.use_batch_norm:
+            model_layers.append(layers.BatchNormalization(name="bn2"))
+        model_layers.append(layers.Activation("relu", name="relu2"))
+        model_layers.append(layers.MaxPooling2D(pool_size=(2, 2), name="pool2"))
+        
+        # Flatten and Dense Layers
+        model_layers.append(layers.Flatten(name="flatten"))
+        model_layers.append(layers.Dropout(0.5, name="dropout"))
+        model_layers.append(layers.Dense(128, name="dense1"))
+        if self.use_batch_norm:
+            model_layers.append(layers.BatchNormalization(name="bn_dense"))
+        model_layers.append(layers.Activation("relu", name="relu_dense"))
+        model_layers.append(layers.Dense(self.num_classes, activation="softmax", name="output_layer"))
+        
+        # Create the final model
+        self.model = keras.Sequential(model_layers, name="cnn_model")
+        
         print("CNN model built:")
         self.model.summary() # Print model summary to console
 
-    def train(self, X_train, Y_train, epochs, batch_size, learning_rate, patience, log_callback=None, progress_callback=None):
+    def train(self, X_train, Y_train, epochs, batch_size, learning_rate, patience, log_callback=None, progress_callback=None, use_lr_scheduler=False):
         """Trains the CNN model using the provided data.
            Accepts log_callback and progress_callback.
+           Optionally uses learning rate scheduling.
         """
         # --- Use passed callbacks or default print --- #
         current_log_callback = log_callback if log_callback else lambda msg: print(msg, file=sys.stderr)
@@ -156,6 +194,18 @@ class CNNModel:
         # -------------------------------- #
 
         callbacks = []
+        # Add learning rate scheduler if requested
+        if use_lr_scheduler:
+            lr_scheduler = ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.2,
+                patience=max(5, patience // 2),
+                min_lr=1e-6,
+                verbose=1
+            )
+            callbacks.append(lr_scheduler)
+            current_log_callback(f"  Enabled Learning Rate Scheduler (ReduceLROnPlateau)")
+            
         if patience > 0:
             early_stopping = EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
             callbacks.append(early_stopping)

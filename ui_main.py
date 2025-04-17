@@ -905,258 +905,243 @@ class MainWindow(QMainWindow):
             self.test_tab_widget.no_button.setEnabled(False)
 
     def start_training(self):
-        """Initiates the model training process based on UI settings."""
-        if self.X_train is None or self.Y_train is None or self.X_dev is None or self.Y_dev is None:
-            self._log_message("Error: Training data not loaded or incomplete.")
-            return
-        if self.num_classes <= 0:
-             self._log_message("Error: Number of classes not determined from loaded data.")
-             return
+        """Starts the model training process in a background thread."""
+        self._log_message("Preparing to start training...")
 
-        # --- Check if training is already running using the flag --- #
+        # --- Check if data is loaded --- #
+        if self.X_train is None or self.Y_train is None:
+            self._log_message("Error: Training data (X_train, Y_train) not loaded.")
+            return
+        # Optional: Check for dev/validation data if required by your logic
+        if self.X_dev is None or self.Y_dev is None:
+            self._log_message("Warning: Validation data (X_dev, Y_dev) not loaded. Some features like Early Stopping might not work optimally.")
+            # Decide if you want to proceed or return here
+            # return
+        if self.num_classes <= 0:
+            self._log_message("Error: Number of classes not determined from loaded data.")
+            return
+        # ------------------------------- #
+
+        # --- Check if training is already running --- #
         if self.is_training:
             self._log_message("Warning: Training is already in progress.")
             return
-        # ---------------------------------------------------------- #
+        # ------------------------------------------ #
 
-        # --- Get Selected Model Type --- #
-        selected_model_type = self.model_type_combo.currentText()
-        self.current_model_type = selected_model_type # Store the selected type
-        self._log_message(f"Selected model type: {selected_model_type}")
+        # Validate model type selection
+        model_type_str = self.model_type_combo.currentText()
+        if not model_type_str or model_type_str == "No Models Found":
+            self._log_message("Error: No valid model type selected.")
+            return
+            
+        self._log_message(f"Starting {model_type_str} training...")
+        self.current_model_type = model_type_str # Store current selection
 
-        # --- Prepare Data Shape Based on Model --- #
-        X_train_model, X_dev_model = None, None
-        input_shape_for_model = None
-        self.model_layer_dims = None # Reset layer dims here
-
-        # Check the dimensions of the loaded data
-        data_ndim = self.X_train.ndim
-        self._log_message(f"Loaded data dimensions: {data_ndim}, Shape: {self.X_train.shape}")
-
+        # --- Common training parameters --- #
         try:
-            if selected_model_type == "Simple NN":
-                if data_ndim == 4: # Data is (samples, H, W, C), needs flattening for NN
-                    self._log_message("Data is 4D, flattening for Simple NN...")
-                    num_samples_train, H, W, C = self.X_train.shape
-                    num_samples_dev = self.X_dev.shape[0]
-                    num_features = H * W * C
-                    # Reshape to (samples, features) then transpose to (features, samples)
-                    X_train_model = self.X_train.reshape(num_samples_train, num_features).T
-                    X_dev_model = self.X_dev.reshape(num_samples_dev, num_features).T
-                    self._log_message(f"Flattened shapes: X_train={X_train_model.shape}, X_dev={X_dev_model.shape}")
-                elif data_ndim == 2: # Data is already (features, samples)
-                    self._log_message("Data is 2D, using directly for Simple NN.")
-                    num_features = self.X_train.shape[0]
-                    X_train_model = self.X_train
-                    X_dev_model = self.X_dev
-                else:
-                    raise ValueError(f"Unexpected data dimensions for Simple NN: {data_ndim}")
-
-                input_shape_for_model = (num_features,) # Shape for NN input layer
-
-                # Calculate layer dims for SimpleNN
-                hidden_layers_str = self.hidden_layers_input.text()
-                hidden_layers = [int(x.strip()) for x in hidden_layers_str.split(',') if x.strip()]
-                self.model_layer_dims = [num_features] + hidden_layers + [self.num_classes]
-                self._log_message(f"Calculated Simple NN layer dims: {self.model_layer_dims}")
-
-            elif selected_model_type == "CNN":
-                if data_ndim == 4: # Data is already (samples, H, W, C)
-                    self._log_message("Data is 4D, using directly for CNN.")
-                    num_samples_train, H, W, C = self.X_train.shape
-                    input_shape_for_model = (H, W, C) # Shape for CNN input layer
-                    X_train_model = self.X_train
-                    X_dev_model = self.X_dev
-                elif data_ndim == 2: # Data is (features, samples), needs reshaping for CNN
-                    self._log_message("Data is 2D, reshaping for CNN...")
-                    num_features, num_samples_train = self.X_train.shape
-                    num_samples_dev = self.X_dev.shape[1]
-
-                    # Infer H, W, C from num_features
-                    if num_features == 784: # MNIST-like
-                        input_shape_for_model = (28, 28, 1)
-                    elif num_features == 3072: # CIFAR-10 like
-                        input_shape_for_model = (32, 32, 3)
-                    else:
-                        raise ValueError(f"Cannot determine CNN image shape from {num_features} features.")
-
-                    target_shape_train = (num_samples_train,) + input_shape_for_model
-                    target_shape_dev = (num_samples_dev,) + input_shape_for_model
-
-                    # Reshape: Transpose (features, samples) -> (samples, features) then reshape
-                    self._log_message(f"Reshaping train data {self.X_train.shape} -> {target_shape_train}")
-                    X_train_model = self.X_train.T.reshape(target_shape_train)
-                    self._log_message(f"Reshaping dev data {self.X_dev.shape} -> {target_shape_dev}")
-                    X_dev_model = self.X_dev.T.reshape(target_shape_dev)
-                else:
-                    raise ValueError(f"Unexpected data dimensions for CNN: {data_ndim}")
-
-            else:
-                raise ValueError(f"Model type '{selected_model_type}' not recognized for data preparation.")
-
-        except ValueError as e:
-            self._log_message(f"Error preparing data: {e}")
-            return # Stop training if data prep fails
-        except Exception as e:
-            self._log_message(f"Unexpected error during data preparation: {e}")
-            import traceback
-            traceback.print_exc()
+            epochs = int(self.epochs_input.value())
+            learning_rate = float(self.learning_rate_input.value())
+            patience = int(self.patience_input.value())
+            batch_size = int(self.batch_size_input.value())
+        except (ValueError, AttributeError) as e:
+            self._log_message(f"Error reading training parameters: {e}")
             return
 
-        # --- Check if data preparation succeeded --- #
-        if X_train_model is None or X_dev_model is None or input_shape_for_model is None:
-            self._log_message("Error: Failed to prepare data for the selected model (result was None).")
-            return
-
-        # --- Instantiate Correct Model --- #
-        self.current_model = None # Clear previous model instance
-        if selected_model_type == "Simple NN":
-            if not SimpleNeuralNetwork:
-                self._log_message("Error: SimpleNeuralNetwork class not available.")
-                return
-            # Instantiate SimpleNeuralNetwork
-            try:
-                # Ensure self.model_layer_dims was set correctly above
-                if not self.model_layer_dims:
-                    raise ValueError("Model layer dimensions not calculated.")
-                self.current_model = SimpleNeuralNetwork(self.model_layer_dims) # Uses layer_dims
-                self._log_message(f"Instantiated SimpleNeuralNetwork with layers: {self.model_layer_dims}")
-                # Load the actual parameters
-                if hasattr(self.current_model, 'load_params') and self.model_params is not None:
-                    self.current_model.load_params(self.model_params)
-                    self._log_message("Loaded parameters into SimpleNN instance.")
-                    # Enable buttons after successful load
-                    self.save_button.setEnabled(True)
-                    self.predict_drawing_button.setEnabled(True)
-                    self.predict_file_button.setEnabled(True)
-                else:
-                    self._log_message("Warning: Could not load parameters into SimpleNN instance (missing method or no params).")
-            except Exception as e:
-                 self._log_message(f"Error instantiating or loading params for SimpleNeuralNetwork: {e}")
-                 # Reset model if instantiation/load fails
-
-        elif selected_model_type == "CNN":
-            if not CNNModel:
-                 self._log_message("Error: CNNModel class not available.")
-                 return
-            # Instantiate CNNModel
-            try:
-                self.current_model = CNNModel(input_shape=input_shape_for_model, num_classes=self.num_classes)
-                # CNN build_model is called separately, often before training or loading weights
-                self.current_model.build_model() # Build the architecture now
-                self._log_message(f"Instantiated and built CNNModel with input shape: {input_shape_for_model}")
-            except Exception as e:
-                 self._log_message(f"Error instantiating or building CNNModel: {e}")
-                 return
-        # -------------------------------- #
-
-        # --- Get Hyperparameters from UI (based on model type) --- #
+        # --- Prepare data and collect model specific hyperparameters --- #
         training_params = {
-            'model': self.current_model, # Pass the instantiated model object
-            'model_type': selected_model_type,
-            'X_train': X_train_model,
-            'Y_train': self.Y_train,
-            'X_dev': X_dev_model,
-            'Y_dev': self.Y_dev,
-            'num_classes': self.num_classes,
+            'model': None, # Will be set below
+            'model_type': model_type_str,
+            'epochs': epochs,
+            'learning_rate': learning_rate,
+            'patience': patience,
+            'batch_size': batch_size,
+            'num_classes': self.num_classes, # Pass num_classes
         }
 
-        if selected_model_type == "Simple NN":
-            training_params.update({
-                'activation': self.activation_combo.currentText(),
-                'optimizer': self.optimizer_combo.currentText(),
-                # Use values directly from UI elements
-                'learning_rate': self.learning_rate_input.value(),
-                'epochs': self.epochs_input.value(),
-                'batch_size': self.batch_size_input.value() if hasattr(self, 'batch_size_input') else 64, # Keep using CNN's batch size input for now
-                'patience': self.patience_input.value(),
-                'l2_lambda': self.l2_lambda_input.value(),
-                'dropout_rate': 1.0 - self.dropout_keep_prob_input.value(),
-            })
-            # Note: Simple NN currently uses some params intended for CNN UI group (LR, Epochs, Patience, BatchSize)
-            #       Consider adding separate inputs for NN if defaults/ranges need to differ significantly.
-            self._log_message("Gathered Simple NN hyperparameters from UI.")
+        if model_type_str == "Simple NN":
+            # Parse Simple NN specific params
+            try:
+                hidden_layer_str = self.hidden_layers_input.text().strip()
+                hidden_layers = [int(x.strip()) for x in hidden_layer_str.split(',') if x.strip()] if hidden_layer_str else []
+                if not hidden_layers:
+                    raise ValueError("No hidden layer sizes specified.")
+                activation = self.activation_combo.currentText().lower()
+                optimizer = self.optimizer_combo.currentText().lower()
+                l2_lambda = float(self.l2_lambda_input.value())
+                dropout_keep_prob = float(self.dropout_keep_prob_input.value())
+                dropout_rate = 1.0 - dropout_keep_prob
+            except ValueError as e:
+                self._log_message(f"Error reading Simple NN parameters: {e}")
+                return
 
-        elif selected_model_type == "CNN":
+            # --- Prepare data for Simple NN --- #
+            # Expects (features, samples)
+            data_ndim = self.X_train.ndim
+            num_features = 0
+            X_train_nn, X_dev_nn = None, None
+
+            if data_ndim == 4: # Data is (samples, H, W, C)
+                self._log_message("Data is 4D, flattening for Simple NN...")
+                num_samples_train, H, W, C = self.X_train.shape
+                num_features = H * W * C
+                X_train_nn = self.X_train.reshape(num_samples_train, num_features).T
+                if self.X_dev is not None:
+                    num_samples_dev = self.X_dev.shape[0]
+                    X_dev_nn = self.X_dev.reshape(num_samples_dev, num_features).T
+            elif data_ndim == 2: # Data is already (features, samples)
+                 self._log_message("Data is 2D, using directly for Simple NN.")
+                 num_features = self.X_train.shape[0]
+                 X_train_nn = self.X_train
+                 X_dev_nn = self.X_dev
+            else:
+                self._log_message(f"Error: Unexpected training data dimensions for Simple NN: {data_ndim}")
+                return
+
+            if X_train_nn is None:
+                self._log_message("Error: Failed to prepare training data for Simple NN.")
+                return
+            # ---------------------------------- #
+
+            # Log configuration
+            self._log_message(f"SimpleNN Config: hidden_layers={hidden_layers}, activation={activation}, optimizer={optimizer}, l2={l2_lambda}, dropout_keep={dropout_keep_prob}")
+
+            # Calculate layer dims
+            self.model_layer_dims = [num_features] + hidden_layers + [self.num_classes]
+
+            # Create or update the model
+            if self.current_model is None or not isinstance(self.current_model, SimpleNeuralNetwork):
+                self._log_message("Creating new SimpleNN instance...")
+                try:
+                    self.current_model = SimpleNeuralNetwork(self.model_layer_dims)
+                    self._log_message(f"Created SimpleNN with layers: {self.model_layer_dims}")
+                except Exception as e:
+                    self._log_message(f"Error creating SimpleNN model: {e}")
+                    return
+            elif self.current_model.layer_dims != self.model_layer_dims:
+                 self._log_message(f"Simple NN layer dimensions changed ({self.current_model.layer_dims} -> {self.model_layer_dims}). Recreating model.")
+                 try:
+                     self.current_model = SimpleNeuralNetwork(self.model_layer_dims)
+                 except Exception as e:
+                    self._log_message(f"Error recreating SimpleNN model: {e}")
+                    return
+
+            # Update training_params for Simple NN
             training_params.update({
-                'learning_rate': self.learning_rate_input.value(),
-                'epochs': self.epochs_input.value(),
-                'batch_size': self.batch_size_input.value(),
-                'patience': self.patience_input.value(),
-                # CNN-specific params (e.g., activation, optimizer) are often part of the model architecture itself
-                # or handled by the Keras fit method defaults if not explicitly passed.
-                # We pass None for params specific to Simple NN
-                'activation': None,
-                'optimizer': None,
-                'l2_lambda': None,
-                'dropout_rate': None, # Dropout is usually added as a Layer in Keras
+                'model': self.current_model,
+                'X_train': X_train_nn,
+                'Y_train': self.Y_train,
+                'X_dev': X_dev_nn,
+                'Y_dev': self.Y_dev,
+                'hidden_layers': hidden_layers,
+                'activation': activation,
+                'optimizer': optimizer,
+                'l2_lambda': l2_lambda,
+                'dropout_rate': dropout_rate,
             })
-            self._log_message("Using CNN hyperparameters from UI.")
+
+        elif model_type_str == "CNN":
+            # Get CNN specific params from checkboxes
+            use_batch_norm = self.batch_norm_checkbox.isChecked()
+            use_data_augmentation = self.data_aug_checkbox.isChecked()
+            use_lr_scheduler = self.lr_scheduler_checkbox.isChecked()
+            self._log_message(f"CNN Enhancements: BatchNorm={use_batch_norm}, DataAug={use_data_augmentation}, LRScheduler={use_lr_scheduler}")
+
+            # --- Prepare data for CNN --- #
+            # Expects (samples, H, W, C)
+            try:
+                X_train_cnn = self._ensure_cnn_input_shape(self.X_train)
+                X_dev_cnn = self._ensure_cnn_input_shape(self.X_dev) if self.X_dev is not None else None
+                if X_train_cnn is None:
+                    raise ValueError("Failed to prepare training data for CNN shape.")
+                img_shape = X_train_cnn.shape[1:] # Get (H, W, C) from prepared data
+            except Exception as e:
+                 self._log_message(f"Error preparing data for CNN: {e}")
+                 return
+            # ---------------------------- #
+
+            # Create or update the CNN model
+            model_created_or_updated = False
+            if self.current_model is None or not isinstance(self.current_model, CNNModel):
+                self._log_message("Creating new CNN instance...")
+                model_created_or_updated = True
+            else:
+                 # Check if existing CNN model parameters match current settings
+                 current_bn = getattr(self.current_model, 'use_batch_norm', False)
+                 current_da = getattr(self.current_model, 'use_data_augmentation', False)
+                 # Also check input shape and num_classes
+                 if (self.current_model.input_shape != img_shape or
+                     self.current_model.num_classes != self.num_classes or
+                     current_bn != use_batch_norm or
+                     current_da != use_data_augmentation):
+                     self._log_message("CNN parameters or data shape changed. Recreating model...")
+                     model_created_or_updated = True
+
+            if model_created_or_updated:
+                 try:
+                     self.current_model = CNNModel(img_shape, self.num_classes, use_batch_norm=use_batch_norm, use_data_augmentation=use_data_augmentation)
+                     # build_model is called by the TrainingWorker before fit if needed
+                     self._log_message(f"Created/Updated CNN Model: Input={img_shape}, Classes={self.num_classes}, BN={use_batch_norm}, DA={use_data_augmentation}")
+                 except Exception as e:
+                     self._log_message(f"Error creating/updating CNN model: {e}")
+                     return
+
+            # Update training_params for CNN
+            training_params.update({
+                'model': self.current_model,
+                'X_train': X_train_cnn,
+                'Y_train': self.Y_train,
+                'X_dev': X_dev_cnn,
+                'Y_dev': self.Y_dev,
+                'use_batch_norm': use_batch_norm, # Pass flag to worker
+                'use_data_augmentation': use_data_augmentation, # Pass flag to worker
+                'use_lr_scheduler': use_lr_scheduler # Pass flag to worker
+            })
         else:
-            self._log_message(f"ERROR: Unknown model type '{selected_model_type}' for hyperparameter gathering.")
+            self._log_message(f"Error: Unknown model type '{model_type_str}' encountered.")
             return
 
         # --- Setup and Start Training Thread --- #
-        if self.current_model is None:
-            self._log_message("Error: Model could not be instantiated.")
-            self._set_training_ui_enabled(True) # Re-enable UI on early exit
+        if training_params.get('model') is None:
+            self._log_message("Error: Model could not be instantiated or prepared.")
             return
 
-        # Prepare the params string for logging *outside* the f-string
-        params_log_str = str({k: v.shape if isinstance(v, np.ndarray) else type(v) if k=='model' else v for k, v in training_params.items()})
-        self._log_message(f"Starting training thread with params: {params_log_str}")
+        # Log final params being sent (excluding large data arrays)
+        params_log = {k: v for k, v in training_params.items() if not isinstance(v, np.ndarray)} # Exclude numpy arrays
+        params_log['X_train_shape'] = training_params.get('X_train').shape if training_params.get('X_train') is not None else None
+        params_log['X_dev_shape'] = training_params.get('X_dev').shape if training_params.get('X_dev') is not None else None
+        self._log_message(f"Starting training thread with params: {params_log}")
 
         self.training_thread = QThread()
-        # self._log_message(f"DEBUG: Created QThread object: {self.training_thread}") # REMOVED DEBUG LOG
-
-        # Ensure TrainingWorker is imported and available
-        if 'TrainingWorker' not in globals():
-            self._log_message("Error: TrainingWorker class not found.")
-            self._set_training_ui_enabled(True)
-            return
         try:
-            # Check if TrainingWorker can be imported dynamically if needed
-            # from ui.training_worker import TrainingWorker # Might be necessary
             self.training_worker = TrainingWorker(training_params)
         except Exception as e:
-            self._log_message(f"Error initializing TrainingWorker: {{e}}")
-            self._set_training_ui_enabled(True)
+            self._log_message(f"Error initializing TrainingWorker: {e}")
             return
 
         self.training_worker.moveToThread(self.training_thread)
 
-        # --- Connect signals from worker to main thread slots (Ensure signatures match!) --- # Requires TrainingWorker signals
-        self.training_worker.progress.connect(self.update_progress) # Expects (epoch, total_epochs, loss, val_acc)
-        self.training_worker.finished.connect(self.training_finished) # Expects (history_dict or None)
-        self.training_worker.error.connect(self.training_error) # Expects (error_message_str)
-        self.training_worker.log_message.connect(self._handle_worker_log) # Connect to helper slot
-        # ---------------------------------------------------------------------------------- #
+        # Connect signals (ensure signatures match!)
+        self.training_worker.progress.connect(self.update_progress)
+        self.training_worker.finished.connect(self.training_finished)
+        self.training_worker.error.connect(self.training_error)
+        self.training_worker.log_message.connect(self._handle_worker_log)
 
-        # --- Crucial Connection: Worker finished -> Thread quits -> Thread finished --- #
-        self.training_worker.finished.connect(self.training_thread.quit) # Tell thread's event loop to stop when worker is done
-        # ----------------------------------------------------------------------------- #
-
-        self.training_thread.started.connect(self.training_worker.run) # Start worker's run method
-        # Clean up thread object when it finishes (RE-ADD deleteLater)
+        # Thread management connections
+        self.training_worker.finished.connect(self.training_thread.quit)
+        self.training_thread.started.connect(self.training_worker.run)
         self.training_thread.finished.connect(self.training_thread.deleteLater)
-        # Schedule worker object for deletion after thread finishes (RE-ADD deleteLater)
         self.training_thread.finished.connect(self.training_worker.deleteLater)
-        # Connect thread finished signal to the NEW final cleanup slot
         self.training_thread.finished.connect(self._on_thread_actually_finished)
-        # self._log_message(f"DEBUG: Connected QThread.finished to _on_thread_actually_finished. Connections: {self.training_thread.receivers(self.training_thread.finished)}") # REMOVED DEBUG LOG
 
-        # Disable UI during training
+        # Disable UI during training & Reset progress
         self._set_training_ui_enabled(False)
-
-        self.train_loss_history = [] # Reset histories
+        self.train_loss_history = []
         self.val_accuracy_history = []
-         # Reset progress bar
         self.progress_bar.setRange(0, training_params['epochs'])
         self.progress_bar.setValue(0)
 
-        # --- Set Training Flag and Start Thread --- #
-        self.is_training = True # Set flag to indicate training started
-        # self._log_message(f"DEBUG: Starting QThread object: {self.training_thread}") # REMOVED DEBUG LOG
+        # Set flag and start
+        self.is_training = True
         self.training_thread.start()
         self._log_message("Training thread started.")
 
@@ -1184,13 +1169,12 @@ class MainWindow(QMainWindow):
                 self.training_worker.stop() 
                 # Update UI immediately to show stopping state
                 self.stop_button.setText("Stopping...")
-                self.stop_button.setEnabled(False)
-                self.start_button.setEnabled(False)
-                # DO NOT call cleanup/wait here - let the finished signal handle it
+                # REMOVE THE LINE BELOW - Button will be disabled by _on_thread_actually_finished
+                # self.stop_button.setEnabled(False) \n                self.start_button.setEnabled(False)\n                # DO NOT call cleanup/wait here - let the finished signal handle it
             else:
                 self._log_message("Stop requested, but worker object not found.")
                 # Fallback cleanup if worker is somehow None but thread is running
-                self._cleanup_thread()
+                # self._cleanup_thread() # Cleanup is handled by finished signal
         else:
             self._log_message("Stop requested, but no training thread is currently running.")
 
@@ -1954,42 +1938,95 @@ class MainWindow(QMainWindow):
         # REMOVED: self._cleanup_thread() - Cleanup now handled by _on_thread_actually_finished
 
     def _set_training_ui_enabled(self, enabled: bool):
-        """Enables/disables training-related UI elements."""
-        self.start_button.setEnabled(enabled)
-        self.load_button.setEnabled(enabled) # Disable loading new data during training
-        self.dataset_dropdown.setEnabled(enabled) # Disable changing dataset
-        self.model_type_combo.setEnabled(enabled) # Disable changing model type
+        """Enables or disables training UI elements, which is useful during training."""
+        # enabled = True means NOT training, UI should be configurable
+        # enabled = False means IS training, UI should be mostly disabled
+        self._log_message(f"_set_training_ui_enabled called with enabled={enabled}") # Log entry
 
-        # Also disable hyperparameter inputs within their groups
-        # Simple NN Group
+        # --- Controls enabled ONLY when NOT training --- #
+        if hasattr(self, 'start_button'): self.start_button.setEnabled(enabled)
+        if hasattr(self, 'load_button'): self.load_button.setEnabled(enabled)
+        if hasattr(self, 'dataset_dropdown'): self.dataset_dropdown.setEnabled(enabled)
+        if hasattr(self, 'model_type_combo'): self.model_type_combo.setEnabled(enabled)
+
+        # --- Disable/Enable individual Hyperparameter Inputs --- #
+        # Iterate through child widgets of specific groups and disable/enable them
+        param_widgets_to_toggle = []
         if hasattr(self, 'layer_sizes_group'):
-            for widget in self.layer_sizes_group.findChildren(QWidget):
-                 # Check if widget has setEnabled before calling
-                 if hasattr(widget, 'setEnabled'):
-                     widget.setEnabled(enabled)
-        # Common Params Group
+             param_widgets_to_toggle.extend(self.layer_sizes_group.findChildren(QWidget))
         if hasattr(self, 'common_params_group'):
-             for widget in self.common_params_group.findChildren(QWidget):
-                 if hasattr(widget, 'setEnabled'):
-                     widget.setEnabled(enabled)
-        # CNN Group (if applicable)
+             param_widgets_to_toggle.extend(self.common_params_group.findChildren(QWidget))
         if hasattr(self, 'cnn_params_group'):
-             for widget in self.cnn_params_group.findChildren(QWidget):
-                  if hasattr(widget, 'setEnabled'):
-                      widget.setEnabled(enabled)
+             param_widgets_to_toggle.extend(self.cnn_params_group.findChildren(QWidget))
 
-        # Stop button logic: Enable ONLY when training starts, disable otherwise
-        self.stop_button.setEnabled(not enabled)
+        # Filter for specific input types to avoid disabling labels etc.
+        input_widget_types = (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox)
+        for widget in param_widgets_to_toggle:
+             if isinstance(widget, input_widget_types):
+                 widget.setEnabled(enabled)
+        # ----------------------------------------------------- #
 
-        # --- IMPORTANT: Keep these enabled ---
-        self.training_group.setEnabled(enabled) # DO NOT disable the whole group
-        self.progress_bar.setEnabled(enabled)
-        self.accuracy_label.setEnabled(enabled)
-        # ------------------------------------
+        # --- Stop Button (enabled ONLY DURING training) --- #
+        stop_button_target_state = not enabled # Calculate desired state
+        self._log_message(f"  Setting stop_button enabled state to: {stop_button_target_state}") # Log the state
+        if hasattr(self, 'stop_button'):
+            self.stop_button.setEnabled(stop_button_target_state) # Set enabled state based on 'not enabled'
+            # Keep processEvents for now during diagnosis
+            self._log_message("  Calling QApplication.processEvents() after setting stop button state.")
+            QApplication.processEvents() # Force UI update
+            # -------------------------------------- #
 
-        # Optionally disable tab switching
-        self.tabs.setEnabled(enabled)
+        # --- Tabs (enabled ONLY when NOT training) --- #
+        if hasattr(self, 'tabs'):
+            self.tabs.setEnabled(enabled)
 
+        # --- Main Training Group (Ensure it remains enabled) --- #
+        # We explicitly DO NOT disable self.training_group here.
+        # Its child parameter inputs are disabled individually above.
+        # Buttons (start/stop) are handled separately.
+
+    def _ensure_cnn_input_shape(self, X_data):
+        """
+        Ensures input data has the correct shape for CNN models.
+        Handles reshaping from flattened (2D) to image (4D) format if needed.
+        
+        Args:
+            X_data: Input data, either flat (samples, features) or image format (samples, height, width, channels)
+            
+        Returns:
+            Data in the proper shape for CNN training
+        """
+        if X_data is None:
+            return None
+            
+        # Check if data is already properly shaped (4D)
+        if len(X_data.shape) == 4:
+            # Already in (samples, height, width, channels) format
+            return X_data
+            
+        # Handle flattened data
+        if len(X_data.shape) == 2:
+            num_samples, num_features = X_data.shape
+            
+            # Try to infer image dimensions
+            if num_features == 784:  # MNIST: 28×28×1
+                return X_data.reshape(num_samples, 28, 28, 1)
+            elif num_features == 3072:  # CIFAR: 32×32×3
+                return X_data.reshape(num_samples, 32, 32, 3)
+            elif num_features == 1024:  # Some 32×32×1 grayscale image
+                return X_data.reshape(num_samples, 32, 32, 1)
+            else:
+                # If we can't infer, log warning and make best guess
+                self._log_message(f"Warning: Unknown feature count {num_features}, cannot safely reshape.")
+                # Fallback to MNIST-like dimensions as a default
+                return X_data.reshape(num_samples, 28, 28, 1)
+                
+        # If we get here, the shape is unusual
+        self._log_message(f"Error: Cannot reshape data with shape {X_data.shape} for CNN.")
+        return X_data  # Return as-is, which might cause errors in the CNN
+    
+    # ↑↑↑ --- End of added method --- ↑↑↑
+    
     def _load_cifar100_data(self, path, return_shape='image'):
         # *** LOG FUNCTION ENTRY - V2 ***
         self._log_message(f"---***>>> ENTERED _load_cifar100_data <<<***--- Path: {path}, Shape: {return_shape}")

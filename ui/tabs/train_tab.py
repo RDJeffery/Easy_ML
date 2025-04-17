@@ -3,7 +3,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox, QGroupBox, QFormLayout,
-    QProgressBar
+    QProgressBar, QCheckBox
 )
 from PyQt5.QtCore import Qt
 
@@ -134,7 +134,25 @@ class TrainTab(QWidget):
         # --- CNN Parameters Group --- #
         self.parent_window.cnn_params_group = QGroupBox("CNN: Specific Parameters")
         cnn_form_layout = QFormLayout()
-        cnn_form_layout.addRow(QLabel("Filters, Kernel Size, etc. TBD..."))
+        # Add checkboxes for our new features
+        self.parent_window.batch_norm_checkbox = QCheckBox("Use Batch Normalization")
+        self.parent_window.batch_norm_checkbox.setToolTip("Add Batch Normalization layers after convolutions and dense layers")
+        self.parent_window.batch_norm_checkbox.setChecked(False)
+        cnn_form_layout.addRow("", self.parent_window.batch_norm_checkbox)
+        
+        self.parent_window.data_aug_checkbox = QCheckBox("Use Data Augmentation")
+        self.parent_window.data_aug_checkbox.setToolTip("Apply random transformations (flips, rotations, etc.) to training images")
+        self.parent_window.data_aug_checkbox.setChecked(False)
+        cnn_form_layout.addRow("", self.parent_window.data_aug_checkbox)
+        
+        self.parent_window.lr_scheduler_checkbox = QCheckBox("Use Learning Rate Scheduler")
+        self.parent_window.lr_scheduler_checkbox.setToolTip("Reduce learning rate when model performance plateaus")
+        self.parent_window.lr_scheduler_checkbox.setChecked(False)
+        cnn_form_layout.addRow("", self.parent_window.lr_scheduler_checkbox)
+        
+        # Future CNN parameters could be added here
+        # cnn_form_layout.addRow("Filters:", ...)
+        # cnn_form_layout.addRow("Kernel Size:", ...)
         self.parent_window.cnn_params_group.setLayout(cnn_form_layout)
         main_layout.addWidget(self.parent_window.cnn_params_group)
         # -------------------------- #

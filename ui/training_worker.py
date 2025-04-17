@@ -154,6 +154,29 @@ class TrainingWorker(QObject):
                 keras_batch_size = self.params.get('batch_size', 32)
                 keras_learning_rate = self.params.get('learning_rate', 0.001)
                 keras_patience = self.params.get('patience', 0)
+                # Get the new parameters
+                keras_use_batch_norm = self.params.get('use_batch_norm', False)
+                keras_use_data_augmentation = self.params.get('use_data_augmentation', False)
+                keras_use_lr_scheduler = self.params.get('use_lr_scheduler', False)
+                
+                # Check if the model needs to be built with the new parameters
+                if not self.model.model:  # If model is not built yet
+                    self.log_message.emit(f"Building CNN model with Batch Norm: {keras_use_batch_norm}, Data Aug: {keras_use_data_augmentation}")
+                    # These parameters only take effect during build_model, so we need to set them before building
+                    self.model.use_batch_norm = keras_use_batch_norm
+                    self.model.use_data_augmentation = keras_use_data_augmentation
+                    self.model.build_model()
+                else:
+                    # Model is already built
+                    current_bn = getattr(self.model, 'use_batch_norm', False)
+                    current_da = getattr(self.model, 'use_data_augmentation', False)
+                    if current_bn != keras_use_batch_norm or current_da != keras_use_data_augmentation:
+                        self.log_message.emit(f"Warning: Model architecture parameters changed but model already built. Rebuilding model.")
+                        self.log_message.emit(f"  Batch Norm: {current_bn} -> {keras_use_batch_norm}, Data Aug: {current_da} -> {keras_use_data_augmentation}")
+                        # Update parameters and rebuild model
+                        self.model.use_batch_norm = keras_use_batch_norm
+                        self.model.use_data_augmentation = keras_use_data_augmentation
+                        self.model.build_model()
 
                 # Callback to emit progress (simplified version)
                 class ProgressCallback(tf.keras.callbacks.Callback):
@@ -183,6 +206,7 @@ class TrainingWorker(QObject):
                     'batch_size': keras_batch_size,
                     'learning_rate': keras_learning_rate,
                     'patience': keras_patience,
+                    'use_lr_scheduler': keras_use_lr_scheduler,  # Pass the new LR scheduler parameter
                     'log_callback': self.log_message.emit,       # Pass worker signal emit
                     'progress_callback': self.progress.emit    # Pass worker signal emit
                 }
