@@ -16,8 +16,8 @@ class DrawingCanvas(QWidget):
         self.image.fill(Qt.black)
         self.drawing = False
         self.last_point = QPoint()
-        # Make pen thinner to better match QuickDraw data style
-        self.pen = QPen(Qt.white, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        # Make pen slightly thicker
+        self.pen = QPen(Qt.white, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:

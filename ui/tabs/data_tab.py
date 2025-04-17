@@ -44,7 +44,7 @@ class DataTab(QWidget):
         self.parent_window.quickdraw_random_label = QLabel("Or Load Random:")
         self.parent_window.quickdraw_random_count = QSpinBox()
         self.parent_window.quickdraw_random_count.setRange(0, 100)
-        self.parent_window.quickdraw_random_count.setValue(5)
+        self.parent_window.quickdraw_random_count.setValue(0)
         self.parent_window.quickdraw_random_count.setToolTip("Specify the number of categories to load randomly (ignores list selection). Set to 0 to use list selection.")
 
         form_layout.addRow(self.parent_window.quickdraw_select_label)

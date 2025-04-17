@@ -421,24 +421,193 @@ class MainWindow(QMainWindow):
     def _handle_worker_error(self, error_message):
         self._log_message(f"ERROR from worker thread: {error_message}")
         # Clean up thread and re-enable UI even on error
-        self._cleanup_thread()
+        # REMOVED direct call: self._cleanup_thread() - Cleanup now handled by _on_thread_actually_finished
 
-    def _cleanup_thread(self):
-        """Cleans up UI after training thread finished.
-           Triggered by QThread.finished signal.
-        """
-        self._log_message("Cleaning up UI after training thread finished...")
-        # References are cleared via deleteLater connected to QThread.finished
-        # Ensure UI reflects stopped state
-        self.start_button.setEnabled(True)
-        self.stop_button.setText("🛑 Stop Training") # Reset text
-        self.stop_button.setEnabled(False)
-        self.progress_bar.setValue(0) # Reset progress bar value
-        self.training_group.setEnabled(True) # Re-enable config
-        self.tabs.setEnabled(True) # Re-enable tab switching
-        self.is_training = False # <<< RESET THE FLAG HERE
-        self._log_message("=== Training Thread Finished/Aborted - UI Reset ===")
-        # QApplication.processEvents() # REMOVE THIS - Let Qt handle event loop
+    def _on_thread_actually_finished(self):
+        """Slot connected to QThread.finished signal. Performs final cleanup AFTER the thread's event loop has ended."""
+        self._log_message("QThread.finished signal received. Performing final cleanup...") # Kept this informative log
+
+        # Ensure UI reflects stopped state and is re-enabled
+        try:
+            # self._log_message("DEBUG: Re-enabling start button...") # REMOVED DEBUG LOG
+            self.start_button.setEnabled(True) # Re-enable start button *now*
+            # self._log_message("DEBUG: Resetting stop button text...") # REMOVED DEBUG LOG
+            self.stop_button.setText("🛑 Stop Training") # Reset text
+            # self._log_message("DEBUG: Disabling stop button...") # REMOVED DEBUG LOG
+            self.stop_button.setEnabled(False)
+            # self._log_message("DEBUG: Resetting progress bar...") # REMOVED DEBUG LOG
+            self.progress_bar.setValue(0) # Reset progress bar value
+            # Check if training group exists before enabling (might be during shutdown)
+            if hasattr(self, 'training_group'):
+                # self._log_message("DEBUG: Re-enabling training group...") # REMOVED DEBUG LOG
+                self.training_group.setEnabled(True) # Re-enable config
+            else:
+                pass # No need to log this specific case for the user
+                # self._log_message("DEBUG: training_group not found, skipping enable.") # REMOVED DEBUG LOG
+            if hasattr(self, 'tabs'):
+                # self._log_message("DEBUG: Re-enabling tabs...") # REMOVED DEBUG LOG
+                self.tabs.setEnabled(True) # Re-enable tab switching
+            else:
+                 pass # No need to log this specific case for the user
+                 # self._log_message("DEBUG: tabs not found, skipping enable.") # REMOVED DEBUG LOG
+        except Exception as e:
+            self._log_message(f"CRITICAL ERROR during UI reset in _on_thread_actually_finished: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Reset state flags and references
+        # self._log_message("DEBUG: Resetting is_training flag...") # REMOVED DEBUG LOG
+        self.is_training = False
+        # These might already be scheduled for deletion by deleteLater,
+        # but nullifying references helps prevent accidental use.
+        # self._log_message("DEBUG: Nullifying worker/thread references...") # REMOVED DEBUG LOG
+        self.training_worker = None
+        self.training_thread = None
+
+        self._log_message("=== Training Thread Fully Finished - UI Reset Complete ===")
+
+    def _predict_drawing(self):
+        """Gets the drawing from the canvas, preprocesses, and predicts."""
+        if self.current_model is None:
+            self._log_message("No model loaded or trained yet.")
+            return
+
+        # Get the drawing as a NumPy array (e.g., 28x28)
+        drawing_array = self.drawing_canvas.getDrawingArray()
+        if drawing_array is None:
+            self._log_message("Canvas is empty or drawing is invalid.")
+            # --- Clear previous results --- #
+            self.image_preview_label.clear()
+            self.image_preview_label.setText("(Canvas Empty)") # Give feedback
+            if hasattr(self, 'probability_graph') and self.probability_graph:
+                self.probability_graph.clear_graph()
+            self.prediction_result_label.setText("Prediction: N/A")
+            # ------------------------------ #
+            return
+
+        # --- Display Drawing Preview --- #
+        preview_pixmap = self.drawing_canvas.getPreviewPixmap()
+        if preview_pixmap:
+            # Scale pixmap to fit the preview label while maintaining aspect ratio
+            scaled_pixmap = preview_pixmap.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_preview_label.setPixmap(scaled_pixmap)
+        else:
+            self.image_preview_label.setText("(Preview Error)") # Show error if pixmap fails
+        # ------------------------------ #
+
+        # --- Preprocess and reshape based on model type --- #
+        model_type = self.current_model_type # e.g., "Simple NN" or "CNN"
+        input_data = None
+
+        try:
+            if model_type == "Simple NN":
+                self._log_message("Preprocessing drawing for Simple NN...")
+                # Expected shape: (features, 1)
+                # Assuming the drawing array is 2D (H, W)
+                if drawing_array.ndim != 2:
+                    raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
+                num_features = drawing_array.shape[0] * drawing_array.shape[1]
+                # Normalize (0-1 range), flatten, and reshape
+                input_data = drawing_array.flatten().reshape(num_features, 1)
+                # Normalize *after* flattening
+                input_data = input_data / 255.0
+                self._log_message(f"Simple NN input shape: {input_data.shape}")
+
+            elif model_type == "CNN":
+                self._log_message("Preprocessing drawing for CNN...")
+                # Expected shape: (1, H, W, C)
+                # Determine H, W, C. Try from loaded data, fallback to defaults.
+                H, W, C = 28, 28, 1 # Default (e.g., MNIST)
+
+                # Try to get expected shape from the model itself if possible
+                if self.current_model and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape:
+                    try:
+                        # Keras input_shape is often (H, W, C) or (None, H, W, C)
+                        if len(self.current_model.input_shape) == 3:
+                            H, W, C = self.current_model.input_shape
+                        elif len(self.current_model.input_shape) == 4:
+                            H, W, C = self.current_model.input_shape[1:]
+                        self._log_message(f"Using model input shape for CNN: {(H, W, C)}")
+                    except Exception as shape_err:
+                        self._log_message(f"Warning: Could not parse model input shape {self.current_model.input_shape}. Error: {shape_err}. Falling back to default.")
+                # Fallback: Infer from loaded data shape (less reliable)
+                elif hasattr(self, 'X_train') and self.X_train is not None and self.X_train.ndim == 4:
+                    if self.X_train.shape[0] > 0:
+                        H, W, C = self.X_train.shape[1:]
+                        self._log_message(f"Using loaded data shape for CNN: {(H, W, C)}")
+                else:
+                    # No data loaded, use default
+                     self._log_message(f"Warning: No data or model shape available, using default {H}x{W}x{C} for CNN input.")
+
+                # Ensure drawing array is 2D (H, W)
+                if drawing_array.ndim != 2:
+                    raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
+
+                # Resize drawing if it doesn't match the target H, W
+                if drawing_array.shape != (H, W):
+                    self._log_message(f"Warning: Drawing array shape {drawing_array.shape} differs from expected CNN input {(H, W)}. Resizing...")
+                    # Use PIL for resizing to maintain consistency with file loading
+                    img_pil = Image.fromarray(drawing_array.astype(np.uint8)) # Convert to PIL Image
+                    img_resized_pil = img_pil.resize((W, H), Image.Resampling.LANCZOS) # Resize (PIL uses W, H order)
+                    drawing_array = np.array(img_resized_pil) # Convert back to numpy array
+                    self._log_message(f"Resized drawing array to: {drawing_array.shape}")
+
+                # Normalize (0-1 range) and reshape to (1, H, W, C)
+                input_data = drawing_array.reshape(1, H, W, C)
+                # Ensure dtype is float32 for TensorFlow
+                input_data = input_data.astype(np.float32)
+                # Normalize *after* reshaping
+                input_data = input_data / 255.0
+                self._log_message(f"CNN input shape: {input_data.shape}")
+
+            else:
+                self._log_message(f"Prediction not implemented for model type: {model_type}")
+                return
+
+            # --- Perform Prediction --- #
+            self._log_message(f"Predicting using {model_type}...")
+            prediction = self.current_model.predict(input_data)
+            # print(f"Raw prediction output: {prediction}") # Debug
+
+            # --- Process & Display Results --- #
+            if prediction is None:
+                 self._log_message("Prediction failed. Model returned None.")
+                 return
+
+            # Output shape might vary (e.g., (num_classes, 1) for NN, (1, num_classes) for TF Keras)
+            # We need probabilities per class
+            probabilities = prediction.flatten() # Make it 1D
+
+            if probabilities.size == self.num_classes:
+                predicted_class_index = np.argmax(probabilities)
+                confidence = probabilities[predicted_class_index] * 100 # As percentage
+
+                # Get class label (use index if names not available)
+                if self.class_names and 0 <= predicted_class_index < len(self.class_names):
+                    predicted_label = self.class_names[predicted_class_index]
+                else:
+                    predicted_label = f"Class {predicted_class_index}"
+
+                self.prediction_result_label.setText(f"Prediction: {predicted_label} ({confidence:.1f}%)")
+                self._log_message(f"Drawing Prediction: {predicted_label} (Confidence: {confidence:.2f}%) Index: {predicted_class_index}")
+
+                # Update probability bar graph
+                if hasattr(self, 'probability_graph'):
+                     # Call the correct method: set_probabilities
+                     # Pass predicted_label as the second argument, class_names as third
+                     self.probability_graph.set_probabilities(probabilities, predicted_label, self.class_names)
+            else:
+                self._log_message(f"Prediction output size ({probabilities.size}) does not match number of classes ({self.num_classes}).")
+                self.prediction_result_label.setText("Prediction Error")
+
+        except ValueError as e:
+             self._log_message(f"Error preprocessing drawing for prediction: {e}")
+             self.prediction_result_label.setText("Preprocessing Error")
+        except Exception as e:
+            self._log_message(f"An error occurred during drawing prediction: {e}")
+            self.prediction_result_label.setText("Prediction Failed")
+            import traceback
+            traceback.print_exc()
 
     def _predict_image_file(self):
         """Handles image selection, preprocessing, and prediction using the current model."""
@@ -748,6 +917,8 @@ class MainWindow(QMainWindow):
         self._log_message(f"Starting training thread with params: {params_log_str}")
 
         self.training_thread = QThread()
+        # self._log_message(f"DEBUG: Created QThread object: {self.training_thread}") # REMOVED DEBUG LOG
+
         # Ensure TrainingWorker is imported and available
         if 'TrainingWorker' not in globals():
             self._log_message("Error: TrainingWorker class not found.")
@@ -771,13 +942,18 @@ class MainWindow(QMainWindow):
         self.training_worker.log_message.connect(self._handle_worker_log) # Connect to helper slot
         # ---------------------------------------------------------------------------------- #
 
+        # --- Crucial Connection: Worker finished -> Thread quits -> Thread finished --- #
+        self.training_worker.finished.connect(self.training_thread.quit) # Tell thread's event loop to stop when worker is done
+        # ----------------------------------------------------------------------------- #
+
         self.training_thread.started.connect(self.training_worker.run) # Start worker's run method
         # Clean up thread object when it finishes (RE-ADD deleteLater)
         self.training_thread.finished.connect(self.training_thread.deleteLater)
         # Schedule worker object for deletion after thread finishes (RE-ADD deleteLater)
         self.training_thread.finished.connect(self.training_worker.deleteLater)
-        # Connect thread finished signal to UI cleanup method (REMOVED - using QTimer instead)
-        # self.training_thread.finished.connect(self._cleanup_thread)
+        # Connect thread finished signal to the NEW final cleanup slot
+        self.training_thread.finished.connect(self._on_thread_actually_finished)
+        # self._log_message(f"DEBUG: Connected QThread.finished to _on_thread_actually_finished. Connections: {self.training_thread.receivers(self.training_thread.finished)}") # REMOVED DEBUG LOG
 
         # Disable UI during training
         self._set_training_ui_enabled(False)
@@ -790,6 +966,7 @@ class MainWindow(QMainWindow):
 
         # --- Set Training Flag and Start Thread --- #
         self.is_training = True # Set flag to indicate training started
+        # self._log_message(f"DEBUG: Starting QThread object: {self.training_thread}") # REMOVED DEBUG LOG
         self.training_thread.start()
         self._log_message("Training thread started.")
 
@@ -1370,142 +1547,6 @@ class MainWindow(QMainWindow):
         else:
             self._log_message("Load operation cancelled.")
 
-    def _predict_drawing(self):
-        """Gets the drawing from the canvas, preprocesses, and predicts."""
-        if self.current_model is None:
-            self._log_message("No model loaded or trained yet.")
-            return
-
-        # Get the drawing as a NumPy array (e.g., 28x28)
-        drawing_array = self.drawing_canvas.getDrawingArray()
-        if drawing_array is None:
-            self._log_message("Canvas is empty or drawing is invalid.")
-            return
-
-        # --- Display Drawing Preview --- #
-        preview_pixmap = self.drawing_canvas.getPreviewPixmap()
-        if preview_pixmap:
-            # Scale pixmap to fit the preview label while maintaining aspect ratio
-            scaled_pixmap = preview_pixmap.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.image_preview_label.setPixmap(scaled_pixmap)
-        else:
-            self.image_preview_label.setText("(Preview Error)") # Show error if pixmap fails
-        # ------------------------------ #
-
-        # --- Preprocess and reshape based on model type --- #
-        model_type = self.current_model_type # e.g., "Simple NN" or "CNN"
-        input_data = None
-
-        try:
-            if model_type == "Simple NN":
-                self._log_message("Preprocessing drawing for Simple NN...")
-                # Expected shape: (features, 1)
-                # Assuming the drawing array is 2D (H, W)
-                if drawing_array.ndim != 2:
-                    raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
-                num_features = drawing_array.shape[0] * drawing_array.shape[1]
-                # Normalize (0-1 range), flatten, and reshape
-                input_data = drawing_array.flatten().reshape(num_features, 1)
-                # Normalize *after* flattening
-                input_data = input_data / 255.0
-                self._log_message(f"Simple NN input shape: {input_data.shape}")
-
-            elif model_type == "CNN":
-                self._log_message("Preprocessing drawing for CNN...")
-                # Expected shape: (1, H, W, C)
-                # Determine H, W, C. Try from loaded data, fallback to defaults.
-                H, W, C = 28, 28, 1 # Default (e.g., MNIST)
-
-                # Try to get expected shape from the model itself if possible
-                if self.current_model and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape:
-                    try:
-                        # Keras input_shape is often (H, W, C) or (None, H, W, C)
-                        if len(self.current_model.input_shape) == 3:
-                            H, W, C = self.current_model.input_shape
-                        elif len(self.current_model.input_shape) == 4:
-                            H, W, C = self.current_model.input_shape[1:]
-                        self._log_message(f"Using model input shape for CNN: {(H, W, C)}")
-                    except Exception as shape_err:
-                        self._log_message(f"Warning: Could not parse model input shape {self.current_model.input_shape}. Error: {shape_err}. Falling back to default.")
-                # Fallback: Infer from loaded data shape (less reliable)
-                elif self.X_train is not None and self.X_train.ndim == 4:
-                    if self.X_train.shape[0] > 0:
-                        H, W, C = self.X_train.shape[1:]
-                        self._log_message(f"Using loaded data shape for CNN: {(H, W, C)}")
-                else:
-                    # No data loaded, use default
-                     self._log_message(f"Warning: No data or model shape available, using default {H}x{W}x{C} for CNN input.")
-
-                # Ensure drawing array is 2D (H, W)
-                if drawing_array.ndim != 2:
-                    raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
-
-                # Resize drawing if it doesn't match the target H, W
-                if drawing_array.shape != (H, W):
-                    self._log_message(f"Warning: Drawing array shape {drawing_array.shape} differs from expected CNN input {(H, W)}. Resizing...")
-                    # Use PIL for resizing to maintain consistency with file loading
-                    img_pil = Image.fromarray(drawing_array.astype(np.uint8)) # Convert to PIL Image
-                    img_resized_pil = img_pil.resize((W, H), Image.Resampling.LANCZOS) # Resize (PIL uses W, H order)
-                    drawing_array = np.array(img_resized_pil) # Convert back to numpy array
-                    self._log_message(f"Resized drawing array to: {drawing_array.shape}")
-
-                # Normalize (0-1 range) and reshape to (1, H, W, C)
-                input_data = drawing_array.reshape(1, H, W, C)
-                # Ensure dtype is float32 for TensorFlow
-                input_data = input_data.astype(np.float32)
-                # Normalize *after* reshaping
-                input_data = input_data / 255.0
-                self._log_message(f"CNN input shape: {input_data.shape}")
-
-            else:
-                self._log_message(f"Prediction not implemented for model type: {model_type}")
-                return
-
-            # --- Perform Prediction --- #
-            self._log_message(f"Predicting using {model_type}...")
-            prediction = self.current_model.predict(input_data)
-            # print(f"Raw prediction output: {prediction}") # Debug
-
-            # --- Process & Display Results --- #
-            if prediction is None:
-                 self._log_message("Prediction failed. Model returned None.")
-                 return
-
-            # Output shape might vary (e.g., (num_classes, 1) for NN, (1, num_classes) for TF Keras)
-            # We need probabilities per class
-            probabilities = prediction.flatten() # Make it 1D
-
-            if probabilities.size == self.num_classes:
-                predicted_class_index = np.argmax(probabilities)
-                confidence = probabilities[predicted_class_index] * 100 # As percentage
-
-                # Get class label (use index if names not available)
-                if self.class_names and 0 <= predicted_class_index < len(self.class_names):
-                    predicted_label = self.class_names[predicted_class_index]
-                else:
-                    predicted_label = f"Class {predicted_class_index}"
-
-                self.prediction_result_label.setText(f"Prediction: {predicted_label} ({confidence:.1f}%)")
-                self._log_message(f"Drawing Prediction: {predicted_label} (Confidence: {confidence:.2f}%) Index: {predicted_class_index}")
-
-                # Update probability bar graph
-                if hasattr(self, 'probability_graph'):
-                     # Call the correct method: set_probabilities
-                     # Pass predicted_label as the second argument, class_names as third
-                     self.probability_graph.set_probabilities(probabilities, predicted_label, self.class_names)
-            else:
-                self._log_message(f"Prediction output size ({probabilities.size}) does not match number of classes ({self.num_classes}).")
-                self.prediction_result_label.setText("Prediction Error")
-
-        except ValueError as e:
-             self._log_message(f"Error preprocessing drawing for prediction: {e}")
-             self.prediction_result_label.setText("Preprocessing Error")
-        except Exception as e:
-            self._log_message(f"An error occurred during drawing prediction: {e}")
-            self.prediction_result_label.setText("Prediction Failed")
-            import traceback
-            traceback.print_exc()
-
     def _show_expanded_plot(self):
         """Shows the training plot in a separate, resizable dialog window."""
         if self.expanded_plot_dialog is None:
@@ -1651,7 +1692,7 @@ class MainWindow(QMainWindow):
         # --- End of Restored Code ---
 
         # Call cleanup directly to reset UI state etc.
-        self._cleanup_thread()
+        # REMOVED: self._cleanup_thread() - Cleanup now handled by _on_thread_actually_finished
 
     def training_error(self, message: str):
         """Slot called when the training worker emits an error."""
@@ -1664,9 +1705,10 @@ class MainWindow(QMainWindow):
                   dialog_plot_widget.stop_loading_animation()
 
         # Call cleanup directly to reset UI state etc.
-        self._cleanup_thread()
+        # REMOVED: self._cleanup_thread() - Cleanup now handled by _on_thread_actually_finished
 
     def _set_training_ui_enabled(self, enabled: bool):
+        """Enables/disables training-related UI elements."""
         self.start_button.setEnabled(enabled)
         self.stop_button.setEnabled(enabled)
         self.training_group.setEnabled(enabled)
