@@ -84,7 +84,15 @@ try:
     from ui.tabs.test_tab import TestTab
 except ImportError as e:
     print(f"ERROR: Could not import TestTab: {e}")
+    class TestTab(QWidget): pass # Dummy
 
+# --- Import About Dialog --- #
+try:
+    from ui.about_dialog import AboutDialog
+except ImportError as e:
+    print(f"ERROR: Could not import AboutDialog: {e}")
+    AboutDialog = None # Fallback
+# ------------------------- #
 
 # --- Main Application Execution --- #
 if __name__ == '__main__':
@@ -183,7 +191,15 @@ class MainWindow(QMainWindow):
         self.central.setLayout(self.main_layout) # Apply the main layout to the central widget
         self.setCentralWidget(self.central) # Set the central widget for the main window
 
-        # --- Initialize Application State ---
+        # --- Create Menu Bar --- #
+        menu_bar = self.menuBar()
+        help_menu = menu_bar.addMenu("&Help")
+
+        about_action = help_menu.addAction("&About EasyML")
+        about_action.triggered.connect(self._show_about_dialog)
+        # ---------------------- #
+
+        # --- Initialize Application State --- #
         # self._populate_model_dropdown() # REMOVE - Already called in _create_training_group
         # Add connections that depend on multiple UI parts being created
         self.image_col_input.valueChanged.connect(self._update_image_col_type_state)
@@ -2127,3 +2143,14 @@ class MainWindow(QMainWindow):
              self._log_message(f"An unexpected error occurred during CIFAR-100 loading: {e}")
              traceback.print_exc()
              return None
+
+    def _show_about_dialog(self):
+        """Shows the About dialog."""
+        if AboutDialog:
+            dialog = AboutDialog(self) # Parent is the main window
+            dialog.exec_() # Show modal dialog
+        else:
+            self._log_message("Error: AboutDialog could not be loaded.")
+            # Optionally show a basic QMessageBox as fallback
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Error", "Could not load the About dialog.")
