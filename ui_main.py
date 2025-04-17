@@ -31,6 +31,8 @@ import glob # Import glob for file searching
 from typing import Optional, Dict, Any, List, Tuple # Added Tuple
 import pickle # Import pickle for CIFAR-10 loading
 import random # Import random for QuickDraw selection
+import tarfile # Import tarfile to potentially handle .tar.gz
+import traceback # ADDED import
 
 # --- Local UI Component Imports --- #
 # Moved these back to top level
@@ -59,10 +61,11 @@ except ImportError as e:
     class TrainingWorker(QObject): pass # Dummy
 
 try:
-    from ui.probability_bar_graph import ProbabilityBarGraph
+    # Updated import for PredictionVisualizer
+    from ui.probability_bar_graph import PredictionVisualizer
 except ImportError as e:
-    print(f"ERROR: Could not import ProbabilityBarGraph: {e}")
-    class ProbabilityBarGraph(QWidget): pass # Dummy
+    print(f"ERROR: Could not import PredictionVisualizer: {e}")
+    class PredictionVisualizer(QWidget): pass # Dummy
 
 # --- Import Tab Widgets --- #
 try:
@@ -152,6 +155,18 @@ class MainWindow(QMainWindow):
         infer_layout.addWidget(self.test_tab_widget)
         infer_layout.addStretch() # Push content up
 
+        # --- ADD CONNECTIONS FOR YES/NO BUTTONS --- #
+        if hasattr(self.test_tab_widget, 'yes_button') and hasattr(self.test_tab_widget, 'no_button'):
+            self.test_tab_widget.yes_button.clicked.connect(
+                lambda: self._log_message("User Feedback: Yes (Correct Prediction)")
+            )
+            self.test_tab_widget.no_button.clicked.connect(
+                lambda: self._log_message("User Feedback: No (Incorrect Prediction)")
+            )
+        else:
+            self._log_message("Warning: Could not find Yes/No buttons on TestTab to connect signals.")
+        # ----------------------------------------- #
+
         # Add Tabs to Tab Widget with user-friendly names and icons
         self.tabs.addTab(data_tab, "💾 Data")
         self.tabs.addTab(train_tab, "🚀 Train")
@@ -229,82 +244,120 @@ class MainWindow(QMainWindow):
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
         else:
-            base_path = os.path.dirname(os.path.abspath(__file__))
+            # Get the directory containing ui_main.py
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            # If __file__ is the script being run directly, script_dir IS the base path (project root)
+            base_path = script_dir # CORRECTED: Don't go up one level
+
         data_dir = os.path.join(base_path, "data")
-        self._log_message(f"Looking for datasets in: {data_dir}")
+        self._log_message(f"Corrected - Looking for datasets in: {data_dir}") # Updated log
 
         # MNIST Check
         mnist_path = os.path.join(data_dir, "train.csv")
+        self._log_message(f"  Checking for MNIST: {mnist_path} -> Exists? {os.path.exists(mnist_path)}") # ADDED LOG
         if os.path.exists(mnist_path):
             self.datasets_info["MNIST (CSV)"] = {"type": "csv", "path": mnist_path}
-            self._log_message("Found MNIST dataset (train.csv)")
+            self._log_message("    Found MNIST dataset (train.csv)")
 
         # Emoji Check
         emoji_path = os.path.join(data_dir, "emojis.csv")
+        self._log_message(f"  Checking for Emoji: {emoji_path} -> Exists? {os.path.exists(emoji_path)}") # ADDED LOG
         if os.path.exists(emoji_path):
             self.datasets_info["Emoji (CSV - Google)"] = {"type": "emoji", "path": emoji_path, "provider": "Google"}
             self.datasets_info["Emoji (CSV - Apple)"] = {"type": "emoji", "path": emoji_path, "provider": "Apple"}
-            self._log_message("Found Emoji dataset (emojis.csv)")
+            self._log_message("    Found Emoji dataset (emojis.csv)")
 
         # QuickDraw Check
         quickdraw_dir = os.path.join(data_dir, "quickdraw")
+        self._log_message(f"  Checking for QuickDraw Dir: {quickdraw_dir} -> IsDir? {os.path.isdir(quickdraw_dir)}") # ADDED LOG
         if os.path.isdir(quickdraw_dir):
             npy_files = glob.glob(os.path.join(quickdraw_dir, "*.npy"))
+            self._log_message(f"    QuickDraw Dir found. Checking for NPY files in {quickdraw_dir} -> Found: {len(npy_files)}") # ADDED LOG
             if npy_files:
-                # Store the list of files found, sorted for consistency
-                sorted_npy_files = sorted(npy_files)
-                self.datasets_info["QuickDraw (Select Categories)"] = {
-                    "type": "quickdraw",
-                    "files": sorted_npy_files # Store the list of full paths
-                }
-                self._log_message(f"Found {len(npy_files)} QuickDraw NPY files.")
+                self.datasets_info["QuickDraw (.npy)"] = {"type": "quickdraw", "path": quickdraw_dir}
+                self._log_message(f"      Found QuickDraw dataset ({len(npy_files)} categories) in {quickdraw_dir}")
             else:
-                self._log_message(f"No .npy files found in {quickdraw_dir}")
-        else:
-            self._log_message(f"QuickDraw directory not found: {quickdraw_dir}")
+                self._log_message(f"      Found QuickDraw directory, but no .npy files inside: {quickdraw_dir}")
 
-        # --- CIFAR-10 Check --- #
-        cifar10_dir = os.path.join(data_dir, 'cifar-10-batches-py')
-        # Check for existence of a key file, e.g., batches.meta
-        if os.path.exists(os.path.join(cifar10_dir, 'batches.meta')):
-            self.datasets_info["CIFAR-10"] = {"type": "cifar10", "path": data_dir} # Store base data dir
-            self._log_message("Found CIFAR-10 dataset directory.")
-        else:
-            self._log_message(f"CIFAR-10 directory ('{cifar10_dir}') or key file not found.")
-        # ---------------------- #
+        # CIFAR-10 Check (Python version)
+        cifar10_dir = os.path.join(data_dir, "cifar-10-batches-py")
+        self._log_message(f"  Checking for CIFAR-10 Dir: {cifar10_dir} -> IsDir? {os.path.isdir(cifar10_dir)}") # ADDED LOG
+        if os.path.isdir(cifar10_dir):
+            # Check for a key file like 'data_batch_1'
+            cifar10_key_file = os.path.join(cifar10_dir, "data_batch_1") # ADDED VAR
+            self._log_message(f"    CIFAR-10 Dir found. Checking for key file: {cifar10_key_file} -> Exists? {os.path.exists(cifar10_key_file)}") # ADDED LOG
+            if os.path.exists(cifar10_key_file):
+                self.datasets_info["CIFAR-10 (Python)"] = {"type": "cifar10", "path": cifar10_dir}
+                self._log_message("      Found CIFAR-10 dataset (Python version)")
+            else:
+                 self._log_message(f"      Found CIFAR-10 directory, but missing batch files: {cifar10_dir}")
 
-    # --- New method to populate dataset dropdown ---
+        # CIFAR-100 Check (Python version) - ADDED
+        cifar100_dir_or_tar = os.path.join(data_dir, "cifar-100-python")
+        cifar100_tar_path = os.path.join(data_dir, "cifar-100-python.tar.gz")
+        self._log_message(f"  Checking for CIFAR-100 Dir: {cifar100_dir_or_tar} -> IsDir? {os.path.isdir(cifar100_dir_or_tar)}") # ADDED LOG
+
+        if os.path.isdir(cifar100_dir_or_tar):
+             # Check for key files like 'train' and 'test'
+             cifar100_train_file = os.path.join(cifar100_dir_or_tar, "train") # ADDED VAR
+             cifar100_test_file = os.path.join(cifar100_dir_or_tar, "test") # ADDED VAR
+             self._log_message(f"    CIFAR-100 Dir found. Checking train: {cifar100_train_file} -> Exists? {os.path.exists(cifar100_train_file)}") # ADDED LOG
+             self._log_message(f"    CIFAR-100 Dir found. Checking test: {cifar100_test_file} -> Exists? {os.path.exists(cifar100_test_file)}") # ADDED LOG
+             if os.path.exists(cifar100_train_file) and os.path.exists(cifar100_test_file):
+                 self.datasets_info["CIFAR-100 (Python)"] = {"type": "cifar100", "path": cifar100_dir_or_tar}
+                 self._log_message("      Found CIFAR-100 dataset (Python version, extracted)")
+             else:
+                  self._log_message(f"      Found CIFAR-100 directory, but missing train/test files: {cifar100_dir_or_tar}")
+        else:
+            self._log_message(f"  CIFAR-100 Dir not found. Checking for TAR: {cifar100_tar_path} -> Exists? {os.path.exists(cifar100_tar_path)}") # ADDED LOG
+            if os.path.exists(cifar100_tar_path):
+                 # Found the tar.gz, assume it's valid for now (loading will handle extraction/check)
+                 self.datasets_info["CIFAR-100 (Python)"] = {"type": "cifar100", "path": cifar100_tar_path}
+                 self._log_message("    Found CIFAR-100 dataset (Python version, tar.gz)")
+
+        if not self.datasets_info:
+            self._log_message("No compatible datasets found in the 'data' directory.")
+        else:
+            self._log_message(f"Found {len(self.datasets_info)} dataset entries.")
+
+        self.populate_dataset_dropdown() # Update dropdown after scanning
+
+    # --- Method to handle dataset selection changes ---
     def _on_dataset_selected(self):
         """Slot called when the user selects a dataset in the dropdown."""
-        # Generally enables the load button if a valid dataset is selected
         selected_text = self.dataset_dropdown.currentText()
-        # Check if the selected text is one of the keys in our discovered datasets info
         is_valid_selection = selected_text in self.datasets_info
-        # Enable the button only if the selection is valid
         self.load_dataset_button.setEnabled(is_valid_selection)
 
         # --- Show/Hide QuickDraw Selection Widgets --- #
-        is_quickdraw = selected_text == "QuickDraw (Select Categories)"
+        # Use the TYPE from datasets_info to check for QuickDraw
+        is_quickdraw = False
+        if is_valid_selection:
+             dataset_type = self.datasets_info[selected_text].get("type")
+             if dataset_type == "quickdraw":
+                 is_quickdraw = True
+
         self.quickdraw_select_label.setVisible(is_quickdraw)
         self.quickdraw_list_widget.setVisible(is_quickdraw)
         self.quickdraw_random_label.setVisible(is_quickdraw)
         self.quickdraw_random_count.setVisible(is_quickdraw)
 
-        if is_quickdraw and is_valid_selection:
+        if is_quickdraw:
             # Populate the list widget if QuickDraw is selected
             self.quickdraw_list_widget.clear()
             quickdraw_info = self.datasets_info[selected_text]
-            npy_files = quickdraw_info.get("files", [])
-            if npy_files:
-                # Extract category name from filename (e.g., "the_mona_lisa.npy" -> "the mona lisa")
-                category_names = [os.path.splitext(os.path.basename(f))[0].replace("_", " ") for f in npy_files]
-                self.quickdraw_list_widget.addItems(category_names)
-                self._log_message(f"Populated QuickDraw list with {len(category_names)} categories.")
-                # Optionally set a default selection (e.g., first 5 items)
-                # for i in range(min(5, len(category_names))):
-                #     self.quickdraw_list_widget.item(i).setSelected(True)
+            quickdraw_dir = quickdraw_info.get("path")
+            if quickdraw_dir and os.path.isdir(quickdraw_dir):
+                 npy_files = glob.glob(os.path.join(quickdraw_dir, "*.npy"))
+                 if npy_files:
+                      # Extract category name from filename
+                      category_names = sorted([os.path.splitext(os.path.basename(f))[0].replace("_", " ") for f in npy_files])
+                      self.quickdraw_list_widget.addItems(category_names)
+                      self._log_message(f"Populated QuickDraw list with {len(category_names)} categories.")
+                 else:
+                      self._log_message(f"Warning: QuickDraw selected, but no .npy files found in directory: {quickdraw_dir}")
             else:
-                self._log_message("Warning: QuickDraw selected, but no NPY files found in datasets_info.")
+                 self._log_message("Warning: QuickDraw selected, but path info is missing or invalid.")
         # --------------------------------------------- #
 
     def populate_dataset_dropdown(self):
@@ -333,7 +386,7 @@ class MainWindow(QMainWindow):
     def _log_message(self, message):
         timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
         self.log_output.append(f"[{timestamp}] {message}")
-        QApplication.processEvents() # Keep UI responsive
+        # QApplication.processEvents() # Keep UI responsive - REMOVED to prevent potential re-entrancy issues
 
     # Modify the progress update slot to only accept percentage
     def _update_progress(self, percentage_complete):
@@ -468,31 +521,40 @@ class MainWindow(QMainWindow):
 
     def _predict_drawing(self):
         """Gets the drawing from the canvas, preprocesses, and predicts."""
+        # Access widgets via test_tab_widget
         if self.current_model is None:
             self._log_message("No model loaded or trained yet.")
+            if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                self.test_tab_widget.feedback_label.setText("Model not ready")
+                self.test_tab_widget.prediction_visualizer.clear_graph()
+                self.test_tab_widget.yes_button.setEnabled(False)
+                self.test_tab_widget.no_button.setEnabled(False)
             return
 
         # Get the drawing as a NumPy array (e.g., 28x28)
-        drawing_array = self.drawing_canvas.getDrawingArray()
+        drawing_array = self.test_tab_widget.drawing_canvas.getDrawingArray()
         if drawing_array is None:
             self._log_message("Canvas is empty or drawing is invalid.")
             # --- Clear previous results --- #
-            self.image_preview_label.clear()
-            self.image_preview_label.setText("(Canvas Empty)") # Give feedback
-            if hasattr(self, 'probability_graph') and self.probability_graph:
-                self.probability_graph.clear_graph()
-            self.prediction_result_label.setText("Prediction: N/A")
+            if hasattr(self, 'test_tab_widget'):
+                self.test_tab_widget.image_preview_label.clear()
+                self.test_tab_widget.image_preview_label.setText("(Canvas Empty)") # Give feedback
+                if self.test_tab_widget.prediction_visualizer:
+                    self.test_tab_widget.prediction_visualizer.clear_graph()
+                self.test_tab_widget.feedback_label.setText("Prediction: N/A")
+                self.test_tab_widget.yes_button.setEnabled(False)
+                self.test_tab_widget.no_button.setEnabled(False)
             # ------------------------------ #
             return
 
         # --- Display Drawing Preview --- #
-        preview_pixmap = self.drawing_canvas.getPreviewPixmap()
-        if preview_pixmap:
+        preview_pixmap = self.test_tab_widget.drawing_canvas.getPreviewPixmap()
+        if preview_pixmap and hasattr(self, 'test_tab_widget'):
             # Scale pixmap to fit the preview label while maintaining aspect ratio
-            scaled_pixmap = preview_pixmap.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.image_preview_label.setPixmap(scaled_pixmap)
-        else:
-            self.image_preview_label.setText("(Preview Error)") # Show error if pixmap fails
+            scaled_pixmap = preview_pixmap.scaled(self.test_tab_widget.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.test_tab_widget.image_preview_label.setPixmap(scaled_pixmap)
+        elif hasattr(self, 'test_tab_widget'):
+            self.test_tab_widget.image_preview_label.setText("(Preview Error)") # Show error if pixmap fails
         # ------------------------------ #
 
         # --- Preprocess and reshape based on model type --- #
@@ -500,219 +562,331 @@ class MainWindow(QMainWindow):
         input_data = None
 
         try:
+            # [Preprocessing logic as before - Simple NN and CNN]
             if model_type == "Simple NN":
+                # ... (preprocessing as before)
                 self._log_message("Preprocessing drawing for Simple NN...")
-                # Expected shape: (features, 1)
-                # Assuming the drawing array is 2D (H, W)
-                if drawing_array.ndim != 2:
-                    raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
+                if drawing_array.ndim != 2: raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
                 num_features = drawing_array.shape[0] * drawing_array.shape[1]
-                # Normalize (0-1 range), flatten, and reshape
                 input_data = drawing_array.flatten().reshape(num_features, 1)
-                # Normalize *after* flattening
                 input_data = input_data / 255.0
                 self._log_message(f"Simple NN input shape: {input_data.shape}")
 
             elif model_type == "CNN":
+                 # ... (preprocessing as before)
                 self._log_message("Preprocessing drawing for CNN...")
-                # Expected shape: (1, H, W, C)
-                # Determine H, W, C. Try from loaded data, fallback to defaults.
-                H, W, C = 28, 28, 1 # Default (e.g., MNIST)
-
-                # Try to get expected shape from the model itself if possible
+                H, W, C = 28, 28, 1
                 if self.current_model and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape:
-                    try:
-                        # Keras input_shape is often (H, W, C) or (None, H, W, C)
-                        if len(self.current_model.input_shape) == 3:
-                            H, W, C = self.current_model.input_shape
-                        elif len(self.current_model.input_shape) == 4:
-                            H, W, C = self.current_model.input_shape[1:]
-                        self._log_message(f"Using model input shape for CNN: {(H, W, C)}")
-                    except Exception as shape_err:
-                        self._log_message(f"Warning: Could not parse model input shape {self.current_model.input_shape}. Error: {shape_err}. Falling back to default.")
-                # Fallback: Infer from loaded data shape (less reliable)
+                     try:
+                         if len(self.current_model.input_shape) == 3: H, W, C = self.current_model.input_shape
+                         elif len(self.current_model.input_shape) == 4: H, W, C = self.current_model.input_shape[1:]
+                         self._log_message(f"Using model input shape for CNN: {(H, W, C)}")
+                     except Exception as shape_err: self._log_message(f"Warning: Could not parse model input shape {self.current_model.input_shape}. Error: {shape_err}. Falling back to default.")
                 elif hasattr(self, 'X_train') and self.X_train is not None and self.X_train.ndim == 4:
-                    if self.X_train.shape[0] > 0:
-                        H, W, C = self.X_train.shape[1:]
-                        self._log_message(f"Using loaded data shape for CNN: {(H, W, C)}")
-                else:
-                    # No data loaded, use default
-                     self._log_message(f"Warning: No data or model shape available, using default {H}x{W}x{C} for CNN input.")
+                     if self.X_train.shape[0] > 0: H, W, C = self.X_train.shape[1:]; self._log_message(f"Using loaded data shape for CNN: {(H, W, C)}")
+                else: self._log_message(f"Warning: No data or model shape available, using default {H}x{W}x{C} for CNN input.")
 
-                # Ensure drawing array is 2D (H, W)
-                if drawing_array.ndim != 2:
-                    raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
-
-                # Resize drawing if it doesn't match the target H, W
+                if drawing_array.ndim != 2: raise ValueError(f"Unexpected drawing array dimension: {drawing_array.ndim}")
                 if drawing_array.shape != (H, W):
-                    self._log_message(f"Warning: Drawing array shape {drawing_array.shape} differs from expected CNN input {(H, W)}. Resizing...")
-                    # Use PIL for resizing to maintain consistency with file loading
-                    img_pil = Image.fromarray(drawing_array.astype(np.uint8)) # Convert to PIL Image
-                    img_resized_pil = img_pil.resize((W, H), Image.Resampling.LANCZOS) # Resize (PIL uses W, H order)
-                    drawing_array = np.array(img_resized_pil) # Convert back to numpy array
-                    self._log_message(f"Resized drawing array to: {drawing_array.shape}")
+                     self._log_message(f"Warning: Drawing array shape {drawing_array.shape} differs from expected CNN input {(H, W)}. Resizing...")
+                     img_pil = Image.fromarray(drawing_array.astype(np.uint8))
+                     img_resized_pil = img_pil.resize((W, H), Image.Resampling.LANCZOS)
+                     drawing_array = np.array(img_resized_pil)
+                     self._log_message(f"Resized drawing array to: {drawing_array.shape}")
 
-                # Normalize (0-1 range) and reshape to (1, H, W, C)
                 input_data = drawing_array.reshape(1, H, W, C)
-                # Ensure dtype is float32 for TensorFlow
                 input_data = input_data.astype(np.float32)
-                # Normalize *after* reshaping
                 input_data = input_data / 255.0
                 self._log_message(f"CNN input shape: {input_data.shape}")
-
             else:
                 self._log_message(f"Prediction not implemented for model type: {model_type}")
+                if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                    self.test_tab_widget.feedback_label.setText("Prediction N/A")
+                    self.test_tab_widget.prediction_visualizer.clear_graph()
+                    self.test_tab_widget.yes_button.setEnabled(False)
+                    self.test_tab_widget.no_button.setEnabled(False)
                 return
 
             # --- Perform Prediction --- #
             self._log_message(f"Predicting using {model_type}...")
-            prediction = self.current_model.predict(input_data)
-            # print(f"Raw prediction output: {prediction}") # Debug
+            prediction_output = self.current_model.predict(input_data)
+            # print(f"Raw prediction output: {prediction_output}") # Debug
 
             # --- Process & Display Results --- #
-            if prediction is None:
+            if prediction_output is None:
                  self._log_message("Prediction failed. Model returned None.")
+                 if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                     self.test_tab_widget.feedback_label.setText("Prediction Failed")
+                     self.test_tab_widget.prediction_visualizer.clear_graph()
+                     self.test_tab_widget.yes_button.setEnabled(False)
+                     self.test_tab_widget.no_button.setEnabled(False)
                  return
 
-            # Output shape might vary (e.g., (num_classes, 1) for NN, (1, num_classes) for TF Keras)
-            # We need probabilities per class
-            probabilities = prediction.flatten() # Make it 1D
+            probabilities = prediction_output.flatten() # Make it 1D
 
             if probabilities.size == self.num_classes:
-                predicted_class_index = np.argmax(probabilities)
-                confidence = probabilities[predicted_class_index] * 100 # As percentage
+                # Pass raw probabilities, visualizer handles finding max etc.
+                if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                    self.test_tab_widget.prediction_visualizer.set_probabilities(probabilities, class_names=self.class_names)
 
-                # Get class label (use index if names not available)
-                if self.class_names and 0 <= predicted_class_index < len(self.class_names):
-                    predicted_label = self.class_names[predicted_class_index]
-                else:
-                    predicted_label = f"Class {predicted_class_index}"
-
-                self.prediction_result_label.setText(f"Prediction: {predicted_label} ({confidence:.1f}%)")
-                self._log_message(f"Drawing Prediction: {predicted_label} (Confidence: {confidence:.2f}%) Index: {predicted_class_index}")
-
-                # Update probability bar graph
-                if hasattr(self, 'probability_graph'):
-                     # Call the correct method: set_probabilities
-                     # Pass predicted_label as the second argument, class_names as third
-                     self.probability_graph.set_probabilities(probabilities, predicted_label, self.class_names)
+                    # Update Feedback Label and Buttons based on visualizer's predicted name
+                    feedback_name = self.test_tab_widget.prediction_visualizer.get_predicted_class_name()
+                    if feedback_name:
+                        self.test_tab_widget.feedback_label.setText(f"Is it a {feedback_name}?")
+                        self.test_tab_widget.yes_button.setEnabled(True)
+                        self.test_tab_widget.no_button.setEnabled(True)
+                        # Log confidence of the predicted class
+                        pred_index = self.test_tab_widget.prediction_visualizer.predicted_class_index
+                        # Use nan_to_num to handle potential NaN in probabilities
+                        valid_probs = np.nan_to_num(probabilities)
+                        confidence = valid_probs[pred_index] * 100 if 0 <= pred_index < len(valid_probs) else float('nan')
+                        self._log_message(f"Drawing Prediction: {feedback_name} (Confidence: {confidence:.2f}%) Index: {pred_index}")
+                    else:
+                        # Handle case where visualizer couldn't determine a name (e.g., invalid probs)
+                        self.test_tab_widget.feedback_label.setText("Prediction Error")
+                        self.test_tab_widget.yes_button.setEnabled(False)
+                        self.test_tab_widget.no_button.setEnabled(False)
             else:
                 self._log_message(f"Prediction output size ({probabilities.size}) does not match number of classes ({self.num_classes}).")
-                self.prediction_result_label.setText("Prediction Error")
+                if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                    self.test_tab_widget.feedback_label.setText("Prediction Size Mismatch")
+                    self.test_tab_widget.prediction_visualizer.clear_graph()
+                    self.test_tab_widget.yes_button.setEnabled(False)
+                    self.test_tab_widget.no_button.setEnabled(False)
 
+        # --- Separate Exception Handling --- #
         except ValueError as e:
-             self._log_message(f"Error preprocessing drawing for prediction: {e}")
-             self.prediction_result_label.setText("Preprocessing Error")
+            self._log_message(f"Error during prediction preprocessing (drawing): {e}")
+            if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                self.test_tab_widget.feedback_label.setText("Preprocessing Error")
+                self.test_tab_widget.prediction_visualizer.clear_graph()
+                self.test_tab_widget.yes_button.setEnabled(False)
+                self.test_tab_widget.no_button.setEnabled(False)
         except Exception as e:
-            self._log_message(f"An error occurred during drawing prediction: {e}")
-            self.prediction_result_label.setText("Prediction Failed")
+            self._log_message(f"An unexpected error occurred during drawing prediction: {e}")
+            if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                self.test_tab_widget.feedback_label.setText("Prediction Failed")
+                self.test_tab_widget.prediction_visualizer.clear_graph()
+                self.test_tab_widget.yes_button.setEnabled(False)
+                self.test_tab_widget.no_button.setEnabled(False)
             import traceback
             traceback.print_exc()
+        # --------------------------------- #
 
     def _predict_image_file(self):
         """Handles image selection, preprocessing, and prediction using the current model."""
         self._log_message("--- Starting Prediction ---")
         # Clear previous preview and graph
-        self.image_preview_label.clear()
-        self.image_preview_label.setText("Select an image...")
-        self.probability_graph.clear_graph() # Clear the graph
+        if hasattr(self, 'test_tab_widget'): # Check if tab exists
+            self.test_tab_widget.image_preview_label.clear()
+            self.test_tab_widget.image_preview_label.setText("Select an image...")
+            self.test_tab_widget.prediction_visualizer.clear_graph()
+            self.test_tab_widget.feedback_label.setText("Prediction: N/A")
+            self.test_tab_widget.yes_button.setEnabled(False)
+            self.test_tab_widget.no_button.setEnabled(False)
+        else:
+            # Log if test_tab_widget doesn't exist for some reason
+            self._log_message("Warning: test_tab_widget not found during _predict_image_file initialization.")
+            return # Cannot proceed without the test tab
 
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg)")
         if file_name:
             try:
                 self._log_message(f"Loading image: {file_name}")
                 img = Image.open(file_name)
-                # Get model expected shape
+                # [Preprocessing logic as before - Determine H, W, C, resize, normalize]
                 model_type = self.current_model_type
-                H, W, C = 28, 28, 1  # Default
+                H, W, C = 28, 28, 1
                 if model_type == "CNN":
-                    if self.current_model and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape:
-                        try:
-                            if len(self.current_model.input_shape) == 3: H, W, C = self.current_model.input_shape
-                            elif len(self.current_model.input_shape) == 4: H, W, C = self.current_model.input_shape[1:]
-                            self._log_message(f"Using model input shape for file prediction: {(H, W, C)}")
-                        except Exception:
-                            self._log_message(f"Could not parse model input shape {self.current_model.input_shape}, using default {H}x{W}x{C}.")
-                    else:
-                        self._log_message(f"No model shape available, using default {H}x{W}x{C} for file prediction.")
-                # Preprocess image: Convert color, resize
-                target_mode = "L" if C == 1 else "RGB"  # Grayscale or Color
+                     if self.current_model and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape:
+                         try:
+                             if len(self.current_model.input_shape) == 3: H, W, C = self.current_model.input_shape
+                             elif len(self.current_model.input_shape) == 4: H, W, C = self.current_model.input_shape[1:]
+                             self._log_message(f"Using model input shape for file prediction: {(H, W, C)}")
+                         except Exception: self._log_message(f"Could not parse model input shape {self.current_model.input_shape}, using default {H}x{W}x{C}.")
+                     else: self._log_message(f"No model shape available, using default {H}x{W}x{C} for file prediction.")
+                target_mode = "L" if C == 1 else "RGB"
                 self._log_message(f"Preprocessing image file to {target_mode} and size {(W, H)}...")
                 img_processed = img.convert(target_mode).resize((W, H), Image.Resampling.LANCZOS)
-
-                # Convert to numpy array
                 img_array_raw = np.array(img_processed)
-
-                # Prepare data for the specific model
                 input_data = None
                 if model_type == "Simple NN":
-                    num_features = H * W * C
-                    input_data = img_array_raw.flatten().reshape(num_features, 1)
-                    input_data = input_data / 255.0  # Normalize
-                    self._log_message(f"Prepared Simple NN input data, shape: {input_data.shape}")
+                     num_features = H * W * C
+                     input_data = img_array_raw.flatten().reshape(num_features, 1)
+                     input_data = input_data / 255.0
+                     self._log_message(f"Prepared Simple NN input data, shape: {input_data.shape}")
                 elif model_type == "CNN":
-                    input_data = img_array_raw.reshape(1, H, W, C)
-                    input_data = input_data.astype(np.float32)  # Ensure float32 for TF
-                    input_data = input_data / 255.0  # Normalize
-                    self._log_message(f"Prepared CNN input data, shape: {input_data.shape}")
+                     input_data = img_array_raw.reshape(1, H, W, C)
+                     input_data = input_data.astype(np.float32)
+                     input_data = input_data / 255.0
+                     self._log_message(f"Prepared CNN input data, shape: {input_data.shape}")
                 else:
                     self._log_message(f"ERROR: Unknown model type '{model_type}' for prediction.")
+                    if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                         self.test_tab_widget.feedback_label.setText("Prediction N/A (Bad Model Type)")
+                         self.test_tab_widget.prediction_visualizer.clear_graph()
+                         self.test_tab_widget.yes_button.setEnabled(False)
+                         self.test_tab_widget.no_button.setEnabled(False)
                     return
 
                 if input_data is None:
                     self._log_message("ERROR: Failed to prepare input data from file.")
+                    if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                         self.test_tab_widget.feedback_label.setText("Input Data Prep Failed")
+                         self.test_tab_widget.prediction_visualizer.clear_graph()
+                         self.test_tab_widget.yes_button.setEnabled(False)
+                         self.test_tab_widget.no_button.setEnabled(False)
                     return
 
                 # Create QPixmap for display
                 qpixmap_orig = QPixmap(file_name)
                 if qpixmap_orig.isNull():
                     self._log_message(f"Warning: QPixmap failed to load {file_name} directly. Trying PIL conversion.")
-                    # Ensure image is RGB before creating QImage for QPixmap
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    # Create QImage from PIL bytes
+                    if img.mode != 'RGB': img = img.convert('RGB')
                     qimage = QImage(img.tobytes("raw", "RGB"), img.width, img.height, QImage.Format_RGB888)
                     qpixmap_orig = QPixmap.fromImage(qimage)
+                # Access image_preview_label via test_tab_widget
+                scaled_pixmap = qpixmap_orig.scaled(self.test_tab_widget.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.test_tab_widget.image_preview_label.setPixmap(scaled_pixmap)
 
-                scaled_pixmap = qpixmap_orig.scaled(self.image_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.image_preview_label.setPixmap(scaled_pixmap)
-
-                self._log_message("Running forward propagation on drawing...")
+                # --- Perform Prediction --- #
+                self._log_message("Running prediction on file...")
                 if self.current_model is None or not hasattr(self.current_model, 'predict'):
                     self._log_message("ERROR: Model not loaded/trained or has no predict method.")
-                    self.image_preview_label.setText("Model not ready.")
-                    self.probability_graph.clear_graph()
+                    if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                        self.test_tab_widget.feedback_label.setText("Model not ready.")
+                        self.test_tab_widget.prediction_visualizer.clear_graph()
+                        self.test_tab_widget.yes_button.setEnabled(False)
+                        self.test_tab_widget.no_button.setEnabled(False)
                     return
 
-                probabilities = self.current_model.predict(input_data)
-                if probabilities is None:
-                    self._log_message("ERROR: Model prediction failed.")
-                    self.probability_graph.clear_graph()
+                prediction_output = self.current_model.predict(input_data)
+                if prediction_output is None:
+                    self._log_message("ERROR: Model prediction failed (returned None).")
+                    if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                        self.test_tab_widget.feedback_label.setText("Prediction Failed")
+                        self.test_tab_widget.prediction_visualizer.clear_graph()
+                        self.test_tab_widget.yes_button.setEnabled(False)
+                        self.test_tab_widget.no_button.setEnabled(False)
                     return
 
-                prediction = np.argmax(probabilities)
-                probabilities = probabilities.flatten()
+                probabilities = prediction_output.flatten()
 
-                # --- Get Class Name --- #
-                predicted_name = str(prediction) # Default to index string
-                display_names = None # Default to no specific names for graph
-                if self.class_names and prediction < len(self.class_names):
-                    predicted_name = self.class_names[prediction]
-                    display_names = self.class_names # Use names for graph labels
-                    self._log_message(f"Prediction Result: Index={prediction}, Name='{predicted_name}'")
-                else:
-                    self._log_message(f"Prediction Result: Index={prediction} (No class name mapping)")
-                # -------------------- #
+                if probabilities.size != self.num_classes:
+                     self._log_message(f"Prediction output size ({probabilities.size}) does not match number of classes ({self.num_classes}).")
+                     if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                         self.test_tab_widget.feedback_label.setText("Prediction Size Mismatch")
+                         self.test_tab_widget.prediction_visualizer.clear_graph()
+                         self.test_tab_widget.yes_button.setEnabled(False)
+                         self.test_tab_widget.no_button.setEnabled(False)
+                     return
 
-                # Update probability bar graph with probabilities and class names (if available)
-                self.probability_graph.set_probabilities(probabilities, predicted_name, display_names)
+                # Update visualizer with probabilities and class names (if available)
+                display_names = self.class_names # Pass available names
+                if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                    self.test_tab_widget.prediction_visualizer.set_probabilities(probabilities, class_names=display_names)
 
+                    # --- Update Feedback Label and Buttons --- #
+                    feedback_name = self.test_tab_widget.prediction_visualizer.get_predicted_class_name()
+                    if feedback_name:
+                        self.test_tab_widget.feedback_label.setText(f"Is it a {feedback_name}?")
+                        self.test_tab_widget.yes_button.setEnabled(True)
+                        self.test_tab_widget.no_button.setEnabled(True)
+                        # Log confidence
+                        pred_index = self.test_tab_widget.prediction_visualizer.predicted_class_index
+                        # Use nan_to_num to handle potential NaN in probabilities
+                        valid_probs = np.nan_to_num(probabilities)
+                        confidence = valid_probs[pred_index] * 100 if 0 <= pred_index < len(valid_probs) else float('nan')
+                        self._log_message(f"File Prediction: {feedback_name} (Confidence: {confidence:.2f}%) Index: {pred_index}")
+                    else:
+                        self.test_tab_widget.feedback_label.setText("Prediction Error")
+                        self.test_tab_widget.yes_button.setEnabled(False)
+                        self.test_tab_widget.no_button.setEnabled(False)
+                    # ---------------------------------------- #
+
+            # --- Separate Exception Handling --- #
             except Exception as e:
-                self._log_message(f"ERROR during prediction: {e}")
-                self.image_preview_label.setText("Error loading/predicting.")
-                self.probability_graph.clear_graph()
+                self._log_message(f"ERROR during file prediction: {e}")
+                if hasattr(self, 'test_tab_widget'): # Check if tab exists
+                    self.test_tab_widget.feedback_label.setText("Error loading/predicting.")
+                    self.test_tab_widget.prediction_visualizer.clear_graph()
+                    self.test_tab_widget.yes_button.setEnabled(False)
+                    self.test_tab_widget.no_button.setEnabled(False)
+                import traceback
+                traceback.print_exc()
+            # --------------------------------- #
         else:
              self._log_message("Prediction cancelled: No file selected.")
+
+
+    # --- Post Load Update --- #
+    def _post_load_update(self, dataset_name):
+        # Enable the training group now that data is loaded
+        self.training_group.setEnabled(True)
+        self.training_group.setTitle(f"Training Controls ({dataset_name})")
+        self.start_button.setEnabled(True)
+
+        # ... (rest of the correct _post_load_update method) ...
+
+        self.load_button.setEnabled(True)
+        # --- Enable/Disable Prediction Buttons Based on Model and Data --- #
+        drawing_prediction_enabled = False # Default to disabled
+        file_prediction_enabled = False # Default to disabled
+
+        if self.current_model is not None:
+            # Model exists, enable file prediction
+            file_prediction_enabled = True
+
+            # Check if model/data is suitable for drawing canvas (e.g., 28x28x1)
+            is_drawing_compatible = False
+            if self.current_model_type == 'Simple NN':
+                # Check if input features match 28*28
+                if input_features == 784:
+                    is_drawing_compatible = True
+            elif self.current_model_type == 'CNN':
+                # Check if input shape matches (H, W, C) == (28, 28, 1)
+                try:
+                    h, w, c = self.X_train.shape[1:]
+                    if h == 28 and w == 28 and c == 1:
+                         is_drawing_compatible = True
+                except Exception:
+                    # If shape check fails, assume incompatible
+                    pass # Keep is_drawing_compatible False
+
+            if is_drawing_compatible:
+                drawing_prediction_enabled = True
+
+        # Update TestTab buttons
+        if hasattr(self, 'test_tab_widget'):
+             self.test_tab_widget.predict_drawing_button.setEnabled(drawing_prediction_enabled)
+             self.test_tab_widget.predict_file_button.setEnabled(file_prediction_enabled)
+             # Always disable feedback buttons after load
+             self.test_tab_widget.yes_button.setEnabled(False)
+             self.test_tab_widget.no_button.setEnabled(False)
+        # --- End Prediction Button Logic --- #
+
+        # This else corresponds to `if self.X_train is not None:`
+        else:
+            self._log_message("Data loading failed. Training/Testing controls remain disabled.")
+             # Keep buttons on MainWindow/TrainTab disabled
+            self.training_group.setEnabled(False)
+            self.start_button.setEnabled(False)
+            self.load_button.setEnabled(False)
+            self.save_button.setEnabled(False)
+             # --- Disable buttons on TestTab ---
+            if hasattr(self, 'test_tab_widget'):
+                 self.test_tab_widget.predict_drawing_button.setEnabled(False)
+                 self.test_tab_widget.predict_file_button.setEnabled(False)
+                 self.test_tab_widget.yes_button.setEnabled(False)
+                 self.test_tab_widget.no_button.setEnabled(False)
+             # --- End of TestTab button disabling ---
+
+        # Clear Prediction Visualizer and reset feedback UI (This should happen regardless of data load success/failure)
+        if hasattr(self, 'test_tab_widget') and self.test_tab_widget.prediction_visualizer is not None:
+            self.test_tab_widget.prediction_visualizer.clear_graph()
+            self.test_tab_widget.feedback_label.setText("Prediction: N/A")
+            self.test_tab_widget.yes_button.setEnabled(False)
+            self.test_tab_widget.no_button.setEnabled(False)
 
     def start_training(self):
         """Initiates the model training process based on UI settings."""
@@ -1014,7 +1188,7 @@ class MainWindow(QMainWindow):
             # Prepending timestamp to redirected output might be too noisy,
             # so we just insert the text as is.
             self.log_output.insertPlainText(text + '\n')
-            QApplication.processEvents()
+            # QApplication.processEvents() # Keep UI responsive - REMOVED to prevent potential re-entrancy issues
 
     # Add flush method (required for stdout redirection)
     def flush(self):
@@ -1025,13 +1199,20 @@ class MainWindow(QMainWindow):
     # Add methods for dataset loading buttons
     def load_selected_dataset(self):
         """Loads the dataset selected in the dropdown."""
+        # --- ADD DEBUG LOG HERE ---
+        self._log_message(f"DEBUG: load_selected_dataset CALLED. Dropdown key: {self.dataset_dropdown.currentData()}")
+        # --------------------------
         dataset_key = self.dataset_dropdown.currentData()
         if not dataset_key or dataset_key not in self.datasets_info:
             self._log_message("No valid dataset selected.")
             return
+        
+        # --- Assign dataset_name here --- #
+        dataset_name = self.dataset_dropdown.currentText() # Use the text from the dropdown
 
         dataset_info = self.datasets_info[dataset_key]
-        dtype = dataset_info.get('type') # Use .get for safety
+        dataset_type = dataset_info["type"]
+        dataset_path = dataset_info["path"]
 
         # Initial log message moved inside the try block after path/map is determined
         self.current_dataset_name = dataset_key # Store the key name
@@ -1049,22 +1230,38 @@ class MainWindow(QMainWindow):
 
         try:
             npy_map_to_load = None # Initialize variable for QuickDraw map
-            if dtype == 'quickdraw':
+            if dataset_type == 'quickdraw':
                 # --- QuickDraw Selection Logic --- #
-                all_npy_files = dataset_info.get('files', [])
-                if not all_npy_files:
-                    raise ValueError("No QuickDraw NPY files found in dataset info.")
+                quickdraw_dir = dataset_info.get("path")
+                self._log_message(f"Attempting to load QuickDraw from directory: {quickdraw_dir}") # Add entry log
+                if not quickdraw_dir or not os.path.isdir(quickdraw_dir):
+                    raise FileNotFoundError(f"QuickDraw directory not found or invalid: {quickdraw_dir}")
+
+                # --- V3: Force Glob Check --- #
+                self._log_message(f"  Scanning QuickDraw directory for .npy files using glob: {quickdraw_dir}")
+                npy_files_in_dir = glob.glob(os.path.join(quickdraw_dir, "*.npy"))
+                if not npy_files_in_dir:
+                    # Log the directory contents if no npy files found
+                    try:
+                         dir_contents = os.listdir(quickdraw_dir)
+                         self._log_message(f"    DEBUG: Contents of {quickdraw_dir}: {dir_contents}")
+                    except Exception as list_err:
+                         self._log_message(f"    DEBUG: Could not list contents of {quickdraw_dir}: {list_err}")
+                    # *** MODIFIED ERROR MESSAGE ***
+                    raise FileNotFoundError(f"ERROR V3: No .npy files found via glob in {quickdraw_dir}")
+                self._log_message(f"  Found {len(npy_files_in_dir)} .npy files via glob.")
+                # ---------------------------- #
 
                 selected_files_for_map = []
                 random_count = self.quickdraw_random_count.value()
 
                 if random_count > 0:
                     # User specified a random count
-                    if random_count > len(all_npy_files):
-                        self._log_message(f"Warning: Requested {random_count} random categories, but only {len(all_npy_files)} available. Loading all.")
-                        selected_files_for_map = all_npy_files
+                    if random_count > len(npy_files_in_dir):
+                        self._log_message(f"Warning: Requested {random_count} random categories, but only {len(npy_files_in_dir)} available. Loading all.")
+                        selected_files_for_map = npy_files_in_dir
                     else:
-                        selected_files_for_map = random.sample(all_npy_files, random_count)
+                        selected_files_for_map = random.sample(npy_files_in_dir, random_count)
                         self._log_message(f"Randomly selected {random_count} QuickDraw categories.")
                 else:
                     # User selected from the list
@@ -1073,10 +1270,10 @@ class MainWindow(QMainWindow):
                         raise ValueError("QuickDraw selected, but no categories chosen from the list (and random count is 0).")
                     # Map selected text back to file paths (assuming order is preserved)
                     selected_names = {item.text() for item in selected_items}
-                    all_category_names = [os.path.splitext(os.path.basename(f))[0].replace("_", " ") for f in all_npy_files]
+                    all_category_names = [os.path.splitext(os.path.basename(f))[0].replace("_", " ") for f in npy_files_in_dir]
                     for i, name in enumerate(all_category_names):
                         if name in selected_names:
-                            selected_files_for_map.append(all_npy_files[i])
+                            selected_files_for_map.append(npy_files_in_dir[i])
                     self._log_message(f"Selected {len(selected_files_for_map)} QuickDraw categories from list: {[os.path.basename(f) for f in selected_files_for_map]}")
 
                 if not selected_files_for_map:
@@ -1102,7 +1299,7 @@ class MainWindow(QMainWindow):
                      self.class_names = [os.path.splitext(os.path.basename(p))[0].replace("_", " ") for p, index in sorted_items]
                      self._log_message(f"QuickDraw Class names loaded: {self.class_names[:5]}... ({len(self.class_names)} total)")
 
-            elif dtype == 'emoji':
+            elif dataset_type == 'emoji':
                 path = dataset_info.get('path')
                 if not path:
                     raise ValueError("Could not retrieve path for emoji dataset.")
@@ -1121,7 +1318,7 @@ class MainWindow(QMainWindow):
                 if class_names:
                      self._log_message(f"Loaded emoji names: {class_names[:5]}... ({len(class_names)} total)")
 
-            elif dtype == 'cifar10':
+            elif dataset_type == 'cifar10':
                 path = dataset_info.get('path')
                 if not path:
                     raise ValueError("Could not retrieve path for CIFAR-10 dataset.")
@@ -1137,7 +1334,7 @@ class MainWindow(QMainWindow):
                 else:
                      self._log_message("Could not load CIFAR-10 class names.")
 
-            elif dtype == 'csv':
+            elif dataset_type == 'csv':
                 path = dataset_info.get('path')
                 if not path:
                     raise ValueError("Could not retrieve path for CSV dataset.")
@@ -1157,21 +1354,61 @@ class MainWindow(QMainWindow):
                     image_col_type=image_col_type,
                     return_shape=return_shape # Pass required shape
                 )
-            # Removed the final else block as unknown types handled earlier
 
-            # Store loaded data
-            self.X_train, self.Y_train = X_train, Y_train
-            self.X_dev, self.Y_dev = X_dev, Y_dev # Assign validation data too
-            self.num_classes = num_classes
+            # --- RE-INSERTED CIFAR-100 BLOCK --- #
+            elif dataset_type == "cifar100":
+                self._log_message(f"---> Entered CIFAR-100 loading logic block for {dataset_name}.")
+                model_req_shape = 'image' if self.current_model_type == 'CNN' else 'flattened'
+                self._log_message(f"Requesting shape '{model_req_shape}' from CIFAR-100 loader.")
+                self._log_message(f"---> About to call self._load_cifar100_data for path: {dataset_path}")
+                loaded_data = self._load_cifar100_data(dataset_path, return_shape=model_req_shape)
+                self._log_message(f"<--- Returned from self._load_cifar100_data. Result type: {type(loaded_data)}")
 
-            # For debugging/inspection: Store raw flattened training data if available
-            self.raw_X_train_flattened = raw_X_train
+                if loaded_data:
+                    self._log_message(f"    DEBUG: Unpacking result from _load_cifar100_data...")
+                    X_train_part, _, X_test_part, _, self.class_names, fine_labels = loaded_data
+                    # Combine train and test for simplicity
+                    X_train = np.vstack((X_train_part, X_test_part)) # Use combined X for training data
+                    Y_train = np.concatenate((fine_labels["train"], fine_labels["test"])) # Use combined Y for training labels
+                    # Note: We are not creating separate X_dev, Y_dev here. The split happens later in the model training if needed.
+                    X_dev, Y_dev = None, None # Explicitly set dev sets to None for now
+                    num_classes = 100
+                    if not self.class_names:
+                        self._log_message("Warning: Fine label names for CIFAR-100 not loaded, using numbers.")
+                        self.class_names = [str(i) for i in range(num_classes)]
+                    self._log_message(f"Successfully processed CIFAR-100 data. Shape: {X_train.shape}")
+                else:
+                     self._log_message("Raising error because _load_cifar100_data returned None/False.")
+                     raise ValueError("CIFAR-100 loading failed (_load_cifar100_data returned None or False).")
+            # --- END RE-INSERTED BLOCK --- #
 
-            if X_train is None or Y_train is None:
-                 raise ValueError("Data loading returned None. Check logs.")
+            else:
+                 # Added a catch-all else to handle unexpected types
+                 self._log_message(f"Error: Encountered unknown dataset type '{dataset_type}' during loading.")
+                 raise ValueError(f"Unknown dataset type: {dataset_type}")
+
+            # Store loaded data (ensure variables are assigned)
+            if X_train is not None and Y_train is not None:
+                self.X_train, self.Y_train = X_train, Y_train
+                # Handle potentially None dev sets
+                self.X_dev = X_dev if X_dev is not None else np.array([])
+                self.Y_dev = Y_dev if Y_dev is not None else np.array([])
+                self.num_classes = num_classes
+                # Store raw data if available
+                self.raw_X_train_flattened = raw_X_train if raw_X_train is not None else None
+            else:
+                 # This condition suggests loading failed within one of the elif blocks
+                 # Error should have been logged there, but we ensure failure state here
+                 raise ValueError("Data loading failed or returned empty data (X_train/Y_train are None).")
+
+            # --- Log final class_names value before post_load_update --- #
+            self._log_message(f"  DEBUG [load_selected_dataset]: FINAL class_names before _post_load_update: {self.class_names[:10] if self.class_names else 'None'}")
+            # ----------------------------------------------------------- #
 
             # Update UI state after successful load
+            # TEMP: Comment out to diagnose post-prediction clearing - RESTORED
             self._post_load_update(dataset_key)
+            # self._log_message("TEMP DEBUG: Skipped _post_load_update call in load_selected_dataset") # Remove debug log
 
         except FileNotFoundError as e:
             self._log_message(f"Error: Dataset file not found: {e}")
@@ -1181,55 +1418,6 @@ class MainWindow(QMainWindow):
             self._log_message(f"An unexpected error occurred loading data: {e}")
             import traceback
             traceback.print_exc() # Print full traceback for debugging
-
-    def _post_load_update(self, dataset_name):
-        # Enable the training group now that data is loaded
-        self.training_group.setEnabled(True)
-        self.training_group.setTitle(f"Training Controls ({dataset_name})")
-        self.start_button.setEnabled(True)
-        # Keep stop button disabled until training actually starts
-        # self.stop_button.setEnabled(False)
-        # self.save_button.setEnabled(False) # Keep save disabled until training finishes
-
-        # Update model parameter display based on loaded data
-        input_features = 0
-        output_classes = self.num_classes
-        if self.X_train is not None:
-            if self.current_model_type == 'Simple NN':
-                # NN expects (features, samples)
-                input_features = self.X_train.shape[0]
-            elif self.current_model_type == 'CNN':
-                # CNN expects (samples, H, W, C) -> We don't directly set features from here
-                input_features = -1 # Indicate shape is H, W, C
-                pass
-            else:
-                 input_features = self.X_train.shape[0] # Fallback? Or handle error
-
-            self._log_message(f"Dataset loaded: '{dataset_name}'")
-            self._log_message(f"  Training samples: {self.X_train.shape[1] if self.X_train.ndim == 2 else self.X_train.shape[0]}")
-            self._log_message(f"  Validation samples: {self.X_dev.shape[1] if self.X_dev.ndim == 2 else self.X_dev.shape[0]}")
-            if input_features > 0:
-                 self._log_message(f"  Input features: {input_features}")
-            elif input_features == -1:
-                 h,w,c = self.X_train.shape[1:]
-                 self._log_message(f"  Input shape (H, W, C): ({h}, {w}, {c})")
-            self._log_message(f"  Output classes: {output_classes}")
-
-            # Enable inference buttons IF a model is also loaded/trained
-            if self.current_model is not None:
-                self.predict_drawing_button.setEnabled(True)
-                self.predict_file_button.setEnabled(True)
-            # Enable load weights button now that we know num_classes etc.
-            self.load_button.setEnabled(True)
-        else:
-            self._log_message("Data loading failed. Training controls remain disabled.")
-            # Keep buttons disabled
-            self.training_group.setEnabled(False)
-            self.start_button.setEnabled(False)
-            self.load_button.setEnabled(False)
-            self.save_button.setEnabled(False)
-            self.predict_drawing_button.setEnabled(False)
-            self.predict_file_button.setEnabled(False)
 
     def _on_model_type_changed(self, model_type: str):
         """Slot called when the model type dropdown changes."""
@@ -1441,7 +1629,11 @@ class MainWindow(QMainWindow):
 
                     self.model_layer_dims = loaded_layer_dims # Use loaded dims
                     self.num_classes = loaded_num_classes
-                    self.class_names = loaded_class_names # Okay if None
+                    # Only update class_names if the loaded value is not None
+                    if loaded_class_names is not None:
+                        self.class_names = loaded_class_names
+                    else:
+                        self._log_message("Warning: Loaded weights file did not contain class names. Using existing class names if available.")
                     self.current_dataset_name = loaded_dataset_name # Okay if None
                     self.model_params = loaded_params # Store loaded params
 
@@ -1463,8 +1655,18 @@ class MainWindow(QMainWindow):
                                 self._log_message("Loaded parameters into SimpleNN instance.")
                                 # Enable buttons after successful load
                                 self.save_button.setEnabled(True)
-                                self.predict_drawing_button.setEnabled(True)
-                                self.predict_file_button.setEnabled(True)
+                                # --- Corrected & Added Compatibility Check ---
+                                drawing_prediction_enabled = False
+                                if self.current_model_type == 'Simple NN' and self.model_layer_dims and self.model_layer_dims[0] == 784:
+                                    drawing_prediction_enabled = True
+                                # Add check for CNN input shape if possible (assuming self.current_model has input_shape)
+                                elif self.current_model_type == 'CNN' and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape == (28, 28, 1):
+                                    drawing_prediction_enabled = True
+
+                                if hasattr(self, 'test_tab_widget'):
+                                     self.test_tab_widget.predict_drawing_button.setEnabled(drawing_prediction_enabled)
+                                     self.test_tab_widget.predict_file_button.setEnabled(True) # File prediction always enabled if weights load
+                                # ---------------------------------------------
                             else:
                                 self._log_message("Warning: Could not load parameters into SimpleNN instance (missing method or no params).")
                         except Exception as e:
@@ -1484,7 +1686,7 @@ class MainWindow(QMainWindow):
                         except Exception as e:
                              self._log_message(f"Error instantiating or building CNNModel: {e}")
                              return
-                    # -------------------------------- #
+                        # -------------------------------- #
 
                 elif self.current_model_type == "CNN":
                     # Ensure CNN model is instantiated before loading weights
@@ -1526,13 +1728,21 @@ class MainWindow(QMainWindow):
 
                     # Now, attempt to load weights into the (potentially newly created) model
                     if self.current_model and hasattr(self.current_model, 'load_weights'):
-                         
+
                          self.current_model.load_weights(file_path)
                          self._log_message("CNN weights loaded successfully.")
                          # After loading, enable save/predict buttons if not already
                          self.save_button.setEnabled(True)
-                         self.predict_drawing_button.setEnabled(True)
-                         self.predict_file_button.setEnabled(True)
+                         # --- Corrected & Added Compatibility Check ---
+                         drawing_prediction_enabled = False
+                         # Check CNN input shape if possible (assuming self.current_model has input_shape)
+                         if hasattr(self.current_model, 'input_shape') and self.current_model.input_shape == (28, 28, 1):
+                            drawing_prediction_enabled = True
+
+                         if hasattr(self, 'test_tab_widget'):
+                              self.test_tab_widget.predict_drawing_button.setEnabled(drawing_prediction_enabled)
+                              self.test_tab_widget.predict_file_button.setEnabled(True) # File prediction always enabled if weights load
+                         # ---------------------------------------------
                     else:
                          
                          self._log_message("CNN Model object not found or has no load_weights method.")
@@ -1542,7 +1752,6 @@ class MainWindow(QMainWindow):
 
             except Exception as e:
                 self._log_message(f"Error loading weights: {e}")
-                import traceback
                 traceback.print_exc()
         else:
             self._log_message("Load operation cancelled.")
@@ -1591,108 +1800,129 @@ class MainWindow(QMainWindow):
         """Slot to receive progress updates from the training worker."""
         percentage = int((epoch / total_epochs) * 100)
         self.progress_bar.setValue(percentage)
+        self._log_message(f"  DEBUG [update_progress]: Setting progress bar value to {percentage}% (Epoch {epoch}/{total_epochs})")
         self.progress_bar.setFormat(f"Epoch {epoch}/{total_epochs} - Loss: {loss:.4f} - Val Acc: {val_acc:.3f} ({percentage}%)")
 
         # Append data to history lists
         self.train_loss_history.append(loss)
         self.val_accuracy_history.append(val_acc)
 
-        # Update embedded plot (if it exists - though it was removed)
-        # if hasattr(self, 'plot_widget') and self.plot_widget:
-        #      self.plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
-
-        # Update expanded plot if it exists and is visible
-        if self.expanded_plot_dialog and self.expanded_plot_dialog.isVisible():
-            dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
-            if dialog_plot_widget:
-                try:
-                    dialog_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
-                except Exception as e:
-                    self._log_message(f"Error updating expanded plot during progress: {e}")
-
-        QApplication.processEvents() # Keep UI responsive during updates
 
     def training_finished(self, results: Optional[Any]): # Changed type hint to Any
-        """Slot called when the training worker finishes successfully."""
-        self._log_message("Training worker finished successfully. (Inside training_finished slot)")
+        """Slot called when the training worker finishes successfully.
+           Handles results for both SimpleNN (tuple) and CNN (dict).
+        """
+        # --- CORRECTED LOG CALL --- #
+        self._log_message("Training worker finished successfully. Processing results...")
+        # -------------------------- #
+        self.is_training = False # Training is no longer active
+        self._set_training_ui_enabled(True) # Re-enable train/load buttons, disable stop
 
-        # --- Restore Original Code --- #
-        train_loss_history = []
-        val_accuracy_history = []
-        processed_ok = False
-
-        if results is not None:
-            if self.current_model_type == "Simple NN":
-                try:
-                    # Expecting tuple: (final_params, loss_hist, acc_hist)
-                    model_params, train_loss_history, val_accuracy_history = results
-                    self.model_params = model_params # Store final trained parameters (for saving Simple NN)
-                    # Re-instantiate the model object with the trained parameters
-                    if self.model_layer_dims: # Ensure layer dimensions are available
-                        self.current_model = SimpleNeuralNetwork(self.model_layer_dims)
-                        self.current_model.load_params(self.model_params)
-                        self._log_message("Updated self.current_model with trained Simple NN parameters.")
-                    else:
-                        self._log_message("Error: Could not update model instance, layer_dims missing.")
-                        self.current_model = None # Ensure model is None if update failed
-                    processed_ok = True
-                except (TypeError, ValueError) as e:
-                    self._log_message(f"Error unpacking Simple NN results tuple: {e}. Results: {results}")
-
-            elif self.current_model_type == "CNN":
-                if isinstance(results, dict):
-                    # Expecting Keras history dictionary
-                    train_loss_history = results.get('loss', [])
-                    # Handle potential key diff: 'val_accuracy' or 'val_acc'
-                    val_accuracy_history = results.get('val_accuracy', results.get('val_acc', []))
-                    # Params are already updated within self.current_model (the CNNModel instance)
-                    processed_ok = True
-                else:
-                    self._log_message(f"Error: Expected a dictionary for CNN results, got {type(results)}")
-                    processed_ok = False
-            else:
-                self._log_message(f"Warning: Unknown model type '{self.current_model_type}' in training_finished.")
-        # -------------------------------------------- #
-
-        if processed_ok:
-            self.train_loss_history = train_loss_history
-            self.val_accuracy_history = val_accuracy_history
-
-            final_val_acc = val_accuracy_history[-1] if val_accuracy_history else float('nan')
-            self.accuracy_label.setText(f"Final Validation Accuracy: {final_val_acc:.4f}")
-            self._log_message(f"Training complete. Final Validation Accuracy: {final_val_acc:.4f}")
-
-            # Update plots one last time
-            if self.expanded_plot_dialog:
-                dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
-                if dialog_plot_widget:
-                    dialog_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history)
-                    if hasattr(dialog_plot_widget, 'stop_loading_animation'):
-                        dialog_plot_widget.stop_loading_animation()
-
-            # Enable relevant buttons post-training
-            # Check if either model object or params (for SimpleNN) exist
-            if self.current_model or self.model_params:
-                 self.save_button.setEnabled(True)
-                 self.predict_drawing_button.setEnabled(True)
-                 self.predict_file_button.setEnabled(True)
-            else:
-                 self._log_message("Post-training: Model/Params not available, keeping Save/Predict disabled.")
-
-        else: # Handle cases where results were None or processing failed
-            if results is None:
-                self._log_message("Training finished, but no results were returned (possibly stopped early).")
-            else:
-                 self._log_message("Training finished, but results could not be processed.")
-            self.accuracy_label.setText("Training finished (Check Logs).")
-            # Ensure save/predict buttons are disabled if results failed
+        if results is None:
+            self._log_message("Training finished, but no results were returned (possibly stopped early or error).")
+            self.accuracy_label.setText("Training Stopped/Failed")
+            self.progress_bar.setValue(0) # Reset progress
+            # Keep save/predict disabled if no valid results
             self.save_button.setEnabled(False)
             self.predict_drawing_button.setEnabled(False)
             self.predict_file_button.setEnabled(False)
-        # --- End of Restored Code ---
+            return # Exit early
 
-        # Call cleanup directly to reset UI state etc.
-        # REMOVED: self._cleanup_thread() - Cleanup now handled by _on_thread_actually_finished
+        # --- Process Results Based on Type --- #
+        try:
+            final_val_acc = float('nan') # Default to NaN
+            processed_ok = False
+
+            if self.current_model_type == "Simple NN" and isinstance(results, tuple) and len(results) == 3:
+                self._log_message("Processing Simple NN results tuple...")
+                # Expecting tuple: (final_params, loss_hist, acc_hist)
+                model_params, self.train_loss_history, self.val_accuracy_history = results
+                self.model_params = model_params # Store final trained parameters
+                # Update model instance (optional, if needed elsewhere)
+                if self.current_model and hasattr(self.current_model, 'load_params'):
+                    self.current_model.load_params(self.model_params)
+                if self.val_accuracy_history: final_val_acc = self.val_accuracy_history[-1]
+                processed_ok = True
+
+            elif self.current_model_type == "CNN" and isinstance(results, dict):
+                self._log_message("Processing CNN results dictionary (Keras history)...")
+                # Expecting Keras history dictionary
+                keras_history = results
+                self.train_loss_history = keras_history.get('loss', [])
+                # Handle Keras key difference: 'val_accuracy' or 'val_acc'
+                acc_key = 'val_accuracy' if 'val_accuracy' in keras_history else 'val_acc'
+                self.val_accuracy_history = keras_history.get(acc_key, [])
+                # CNN model instance (self.current_model) is updated internally by fit
+                if self.val_accuracy_history: final_val_acc = self.val_accuracy_history[-1]
+                processed_ok = True
+
+            else:
+                 self._log_message(f"Warning: Received unexpected results type ({type(results)}) for model type '{self.current_model_type}'. Cannot process.")
+
+            # --- Update UI if processed successfully --- #
+            if processed_ok:
+                 # Update accuracy label
+                 if not np.isnan(final_val_acc):
+                     self.accuracy_label.setText(f"Final Validation Accuracy: {final_val_acc:.4f}")
+                     self._log_message(f"Final Validation Accuracy: {final_val_acc:.4f}")
+                 else:
+                     self.accuracy_label.setText("Training Complete (No validation accuracy)")
+                 self.progress_bar.setValue(100) # Mark as 100% complete
+
+                 # Update the expanded plot if it's open
+                 if self.expanded_plot_dialog:
+                     # Find the PlotWidget within the dialog (whether new or existing)
+                     dialog_plot_widget = self.expanded_plot_dialog.findChild(PlotWidget)
+                     if dialog_plot_widget:
+                         try:
+                             # Pass interval=1 assuming history is per epoch now
+                             dialog_plot_widget.update_plot(self.train_loss_history, self.val_accuracy_history, interval=1)
+                             self._log_message("Updating expanded plot with final history.")
+                         except Exception as e:
+                             self._log_message(f"Error updating expanded plot: {e}")
+                     else:
+                         self._log_message("Error: Could not find PlotWidget in expanded dialog for final update.")
+
+                 # Enable saving and prediction now that training is done
+                 self.save_button.setEnabled(True)
+                 # Enable prediction buttons on TestTab
+                 if hasattr(self, 'test_tab_widget'):
+                     # --- Check compatibility before enabling drawing button ---
+                     drawing_prediction_enabled = False
+                     if self.current_model_type == 'Simple NN' and self.model_layer_dims and self.model_layer_dims[0] == 784:
+                          drawing_prediction_enabled = True
+                     elif self.current_model_type == 'CNN' and hasattr(self.current_model, 'input_shape') and self.current_model.input_shape == (28, 28, 1):
+                          drawing_prediction_enabled = True
+                     # -------------------------------------------------------
+                     self.test_tab_widget.predict_drawing_button.setEnabled(drawing_prediction_enabled)
+                     self.test_tab_widget.predict_file_button.setEnabled(True) # File prediction always enabled after successful train
+                     # Keep feedback buttons disabled until next prediction
+                     self.test_tab_widget.yes_button.setEnabled(False)
+                     self.test_tab_widget.no_button.setEnabled(False)
+            else:
+                 # Handle case where results type didn't match model type
+                 self.accuracy_label.setText("Training finished (Result Mismatch)")
+                 self.progress_bar.setValue(0) # Reset progress
+                 self.save_button.setEnabled(False)
+                 # Disable prediction buttons on TestTab
+                 if hasattr(self, 'test_tab_widget'):
+                     self.test_tab_widget.predict_drawing_button.setEnabled(False)
+                     self.test_tab_widget.predict_file_button.setEnabled(False)
+                     self.test_tab_widget.yes_button.setEnabled(False)
+                     self.test_tab_widget.no_button.setEnabled(False)
+
+        except Exception as e:
+            self._log_message(f"Error processing training results: {e}")
+            traceback.print_exc()
+            self.accuracy_label.setText("Error processing results")
+            self.progress_bar.setValue(0)
+            self.save_button.setEnabled(False)
+            # Disable prediction buttons on TestTab on error
+            if hasattr(self, 'test_tab_widget'):
+                self.test_tab_widget.predict_drawing_button.setEnabled(False)
+                self.test_tab_widget.predict_file_button.setEnabled(False)
+                self.test_tab_widget.yes_button.setEnabled(False)
+                self.test_tab_widget.no_button.setEnabled(False)
 
     def training_error(self, message: str):
         """Slot called when the training worker emits an error."""
@@ -1710,6 +1940,190 @@ class MainWindow(QMainWindow):
     def _set_training_ui_enabled(self, enabled: bool):
         """Enables/disables training-related UI elements."""
         self.start_button.setEnabled(enabled)
-        self.stop_button.setEnabled(enabled)
-        self.training_group.setEnabled(enabled)
+        self.load_button.setEnabled(enabled) # Disable loading new data during training
+        self.dataset_dropdown.setEnabled(enabled) # Disable changing dataset
+        self.model_type_combo.setEnabled(enabled) # Disable changing model type
+
+        # Also disable hyperparameter inputs within their groups
+        # Simple NN Group
+        if hasattr(self, 'layer_sizes_group'):
+            for widget in self.layer_sizes_group.findChildren(QWidget):
+                 # Check if widget has setEnabled before calling
+                 if hasattr(widget, 'setEnabled'):
+                     widget.setEnabled(enabled)
+        # Common Params Group
+        if hasattr(self, 'common_params_group'):
+             for widget in self.common_params_group.findChildren(QWidget):
+                 if hasattr(widget, 'setEnabled'):
+                     widget.setEnabled(enabled)
+        # CNN Group (if applicable)
+        if hasattr(self, 'cnn_params_group'):
+             for widget in self.cnn_params_group.findChildren(QWidget):
+                  if hasattr(widget, 'setEnabled'):
+                      widget.setEnabled(enabled)
+
+        # Stop button logic: Enable ONLY when training starts, disable otherwise
+        self.stop_button.setEnabled(not enabled)
+
+        # --- IMPORTANT: Keep these enabled ---
+        self.training_group.setEnabled(enabled) # DO NOT disable the whole group
+        self.progress_bar.setEnabled(enabled)
+        self.accuracy_label.setEnabled(enabled)
+        # ------------------------------------
+
+        # Optionally disable tab switching
         self.tabs.setEnabled(enabled)
+
+    def _load_cifar100_data(self, path, return_shape='image'):
+        # *** LOG FUNCTION ENTRY - V2 ***
+        self._log_message(f"---***>>> ENTERED _load_cifar100_data <<<***--- Path: {path}, Shape: {return_shape}")
+        """Loads CIFAR-100 data from pickled files (train, test, meta). Handles tar.gz extraction.
+
+        Args:
+            path (str): Path to the 'cifar-100-python' directory OR the .tar.gz file.
+            return_shape (str): 'flattened' or 'image'.
+
+        Returns:
+            Tuple containing (X_train, y_train_coarse, X_test, y_test_coarse, fine_label_names, fine_labels_dict)
+            or None on failure.
+        """
+        self._log_message(f"--- Loading CIFAR-100 Dataset (from {path}) ---")
+        self._log_message(f"*** Entered _load_cifar100_data function for path: {path} ***") # ADDED ENTRY LOG
+        self._log_message(f"--- Loading CIFAR-100 Dataset (requesting shape: {return_shape}) --- ") # Log requested shape
+
+        data_dir = path
+        # Handle extraction if path is a tar.gz file
+        if path.endswith(".tar.gz") and os.path.exists(path):
+            extracted_dir_name = "cifar-100-python" # Standard name
+            parent_dir = os.path.dirname(path)
+            data_dir = os.path.join(parent_dir, extracted_dir_name)
+            self._log_message(f"Target extracted directory: {data_dir}")
+
+            # Define expected key file paths within the extracted directory
+            extracted_train_path = os.path.join(data_dir, "train")
+            extracted_test_path = os.path.join(data_dir, "test")
+
+            # Check if already extracted and valid
+            if not (os.path.isdir(data_dir) and os.path.exists(extracted_train_path) and os.path.exists(extracted_test_path)):
+                 self._log_message(f"Attempting to extract {path} to {parent_dir}...")
+                 try:
+                     with tarfile.open(path, "r:gz") as tar:
+                         # Check members before extracting (optional security)
+                         # for member in tar.getmembers():
+                         #     print(f"  Extracting: {member.name}")
+                         tar.extractall(path=parent_dir)
+                     self._log_message("Extraction complete.")
+                     # Verify extraction success by checking directory and key files again
+                     if not (os.path.isdir(data_dir) and os.path.exists(extracted_train_path) and os.path.exists(extracted_test_path)):
+                         self._log_message(f"Error: Extraction seemed complete, but key files/dir not found at expected location: {data_dir}")
+                         return None
+                 except Exception as e:
+                     self._log_message(f"Error: Failed to extract CIFAR-100 tar.gz file: {e}")
+                     traceback.print_exc()
+                     return None
+            else:
+                 self._log_message(f"CIFAR-100 directory '{data_dir}' already exists with train/test files, skipping extraction.")
+        elif not os.path.isdir(data_dir):
+             self._log_message(f"Error: CIFAR-100 path is not a directory and not a .tar.gz file: {path}")
+             return None
+
+        # --- Proceed with loading from data_dir (which is now guaranteed to be the directory path) --- #
+        meta_path = os.path.join(data_dir, "meta")
+        train_path = os.path.join(data_dir, "train")
+        test_path = os.path.join(data_dir, "test")
+
+        # --- Add Existence Checks --- #
+        if not os.path.exists(meta_path):
+             self._log_message(f"Error: CIFAR-100 meta file not found at: {meta_path}")
+             return None
+        if not os.path.exists(train_path):
+            self._log_message(f"Error: CIFAR-100 train file not found at: {train_path}")
+            return None
+        if not os.path.exists(test_path):
+            self._log_message(f"Error: CIFAR-100 test file not found at: {test_path}")
+            return None
+        # --------------------------- #
+
+        try:
+            # Load class names (meta file)
+            self._log_message(f"  Loading metadata from: {meta_path}")
+            fine_label_names = []
+            coarse_label_names = []
+            meta = None # Init
+            with open(meta_path, 'rb') as fo:
+                self._log_message(f"    DEBUG: Attempting pickle.load on {meta_path}...")
+                meta = pickle.load(fo, encoding='bytes')
+                self._log_message(f"    DEBUG: pickle.load completed.")
+            # Check for keys before accessing
+            if meta and b'fine_label_names' in meta: fine_label_names = [name.decode('utf-8') for name in meta[b'fine_label_names']]
+            else: self._log_message(f"    Warning: Key b'fine_label_names' not found in meta file.")
+            if meta and b'coarse_label_names' in meta: coarse_label_names = [name.decode('utf-8') for name in meta[b'coarse_label_names']]
+            else: self._log_message(f"    Warning: Key b'coarse_label_names' not found in meta file.")
+            self._log_message(f"    Loaded {len(fine_label_names)} fine labels and {len(coarse_label_names)} coarse labels.")
+
+            # Load training data (single 'train' file)
+            self._log_message(f"  Loading training data from: {train_path}")
+            train_batch = None # Init
+            with open(train_path, 'rb') as fo:
+                self._log_message(f"    DEBUG: Attempting pickle.load on {train_path}...")
+                train_batch = pickle.load(fo, encoding='bytes')
+                self._log_message(f"    DEBUG: pickle.load completed.")
+            # Check keys before access
+            if not train_batch or b'data' not in train_batch or b'fine_labels' not in train_batch or b'coarse_labels' not in train_batch:
+                 raise KeyError("Missing required keys (data, fine_labels, coarse_labels) in train batch.")
+            X_train = train_batch[b'data']
+            y_train_fine = np.array(train_batch[b'fine_labels'])
+            y_train_coarse = np.array(train_batch[b'coarse_labels'])
+            self._log_message(f"    Training data shape: {X_train.shape}")
+
+            # Load test data (single 'test' file)
+            self._log_message(f"  Loading test data from: {test_path}")
+            test_batch = None # Init
+            with open(test_path, 'rb') as fo:
+                 self._log_message(f"    DEBUG: Attempting pickle.load on {test_path}...")
+                 test_batch = pickle.load(fo, encoding='bytes')
+                 self._log_message(f"    DEBUG: pickle.load completed.")
+            # Check keys before access
+            if not test_batch or b'data' not in test_batch or b'fine_labels' not in test_batch or b'coarse_labels' not in test_batch:
+                 raise KeyError("Missing required keys (data, fine_labels, coarse_labels) in test batch.")
+            X_test = test_batch[b'data']
+            y_test_fine = np.array(test_batch[b'fine_labels'])
+            y_test_coarse = np.array(test_batch[b'coarse_labels'])
+            self._log_message(f"    Test data shape: {X_test.shape}")
+
+            # --- Reshape data based on return_shape --- #
+            # CIFAR format: N x 3072 -> N x 3 x 32 x 32 -> N x 32 x 32 x 3
+            def reshape_cifar(data):
+                data = data.reshape(-1, 3, 32, 32)
+                data = data.transpose(0, 2, 3, 1)
+                return data
+
+            if return_shape == 'image':
+                 self._log_message("  Reshaping CIFAR-100 data to 'image' format (samples, 32, 32, 3)...")
+                 X_train = reshape_cifar(X_train)
+                 X_test = reshape_cifar(X_test)
+            elif return_shape == 'flattened':
+                 self._log_message("  Keeping CIFAR-100 data in 'flattened' format (samples, 3072)...")
+                 # Data is already (N, 3072), no reshape needed before splitting
+                 # Normalization and split handles transposition if needed by NN
+                 pass
+            else:
+                 self._log_message(f"Warning: Unknown return_shape '{return_shape}' for CIFAR-100. Keeping as (samples, 3072).")
+
+            self._log_message(f"--- CIFAR-100 Loaded Successfully. Final shapes (before combine/split): Train={X_train.shape}, Test={X_test.shape} ---")
+
+            fine_labels_dict = {"train": y_train_fine, "test": y_test_fine}
+            # Return components separately, main loader combines/splits
+            return X_train, y_train_coarse, X_test, y_test_coarse, fine_label_names, fine_labels_dict
+
+        except FileNotFoundError as e:
+             self._log_message(f"Error loading CIFAR-100 component file: {e}")
+             return None
+        except (KeyError, pickle.UnpicklingError) as e: # Catch pickle errors too
+             self._log_message(f"Error accessing data or unpickling CIFAR-100 file: {e}")
+             traceback.print_exc() # Log traceback for pickle/key errors
+             return None
+        except Exception as e:
+             self._log_message(f"An unexpected error occurred during CIFAR-100 loading: {e}")
+             traceback.print_exc()
+             return None

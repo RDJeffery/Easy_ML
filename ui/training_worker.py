@@ -111,7 +111,10 @@ class TrainingWorker(QObject):
                     acc_val = float(val_acc) if val_acc is not None else np.nan
                     # Pass the extracted total_epochs to the progress signal
                     self.progress.emit(epoch, total_epochs, loss_val, acc_val)
-                    QTimer.singleShot(0, lambda: None) # Yield to event loop
+                    # --- Add small sleep/yield --- #
+                    # QTimer.singleShot(0, lambda: None) # Yield - Keep or remove? Try sleep first.
+                    time.sleep(0.01) 
+                    # --------------------------- #
                     return True # Continue training
 
                 # Prepare params specific to SimpleNN gradient_descent
@@ -152,18 +155,6 @@ class TrainingWorker(QObject):
                 keras_learning_rate = self.params.get('learning_rate', 0.001)
                 keras_patience = self.params.get('patience', 0)
 
-                # TODO: Implement Keras callbacks for better progress reporting and stopping
-                callbacks = []
-                if keras_patience > 0:
-                    early_stopping = tf.keras.callbacks.EarlyStopping(
-                        monitor='val_accuracy', # or 'val_loss'
-                        patience=keras_patience,
-                        verbose=1,
-                        restore_best_weights=True # Restore weights from the best epoch
-                    )
-                    callbacks.append(early_stopping)
-                    self.log_message.emit(f"Enabled Keras EarlyStopping with patience={keras_patience}")
-
                 # Callback to emit progress (simplified version)
                 class ProgressCallback(tf.keras.callbacks.Callback):
                     def __init__(self, worker):
@@ -185,49 +176,40 @@ class TrainingWorker(QObject):
                         self.worker.progress.emit(epoch + 1, self.worker.params.get('epochs', 10), loss, val_acc)
                         QTimer.singleShot(0, lambda: None) # Yield
 
-                callbacks.append(ProgressCallback(self))
-
                 # Prepare params for Keras model.train method
+                # Pass the actual callback functions from the worker
                 keras_params = {
                     'epochs': keras_epochs,
                     'batch_size': keras_batch_size,
                     'learning_rate': keras_learning_rate,
-                    'callbacks': callbacks # Pass the callbacks list
-                    # Keras handles optimizer/loss internally during compile (called in model.train)
+                    'patience': keras_patience,
+                    'log_callback': self.log_message.emit,       # Pass worker signal emit
+                    'progress_callback': self.progress.emit    # Pass worker signal emit
                 }
-                params_log_str = str(keras_params)
+                params_log_str = str(keras_params) # Log the prepared params
                 self.log_message.emit(f"Keras Params: {params_log_str}")
 
                 # Ensure the model has the train method
                 if not hasattr(self.model, 'train'):
                     raise AttributeError("CNN model object does not have 'train' method.")
 
-                # Call Keras training
-                keras_history = self.model.train(
-                    self.X_train, self.Y_train, self.X_dev, self.Y_dev,
-                    **keras_params
+                # Call Keras training using the **kwargs expansion
+                keras_history_obj = self.model.train(
+                    self.X_train, # Or X_train_model etc.
+                    self.Y_train, # Or Y_train_model etc.
+                    # REMOVED self.X_dev and self.Y_dev
+                    **keras_params  # Pass parameters as keyword arguments
                 )
 
-                if keras_history and hasattr(keras_history, 'history'):
+                # --- CORRECTED RESULT HANDLING --- #
+                if keras_history_obj is not None:
                     # For Keras, the result *is* the history dictionary
-                    # We don't get parameters back directly from fit
-                    # MainWindow will need to handle getting params from self.current_model if needed
-                    results_to_emit = keras_history.history
-                    # Emit progress based on the final history data (Optional refinement)
-                    if 'loss' in results_to_emit and 'val_accuracy' in results_to_emit:
-                        num_epochs_trained = len(results_to_emit['loss'])
-                        for i in range(num_epochs_trained):
-                            if not self._is_running: break # Check stop flag between emits
-                            loss_val = results_to_emit['loss'][i]
-                            # Handle potential key differences (e.g., 'val_acc' vs 'val_accuracy')
-                            acc_key = 'val_accuracy' if 'val_accuracy' in results_to_emit else 'val_acc'
-                            acc_val = results_to_emit.get(acc_key, [np.nan])[i]
-                            self.progress.emit(i + 1, self.epochs, loss_val, acc_val) # Emit epoch 1-based
-                            QTimer.singleShot(0, lambda: None) # Yield
-                            time.sleep(0.01) # Small sleep to allow UI updates
+                    self.log_message.emit(f"Keras training successful. History keys: {list(keras_history_obj.keys())}")
+                    results_to_emit = keras_history_obj # Assign the dict
                 else:
-                    self.log_message.emit("Keras training finished but returned no history.")
+                    self.log_message.emit("Keras training finished but returned None (or failed).")
                     results_to_emit = None
+                # --------------------------------- #
 
             else:
                 raise ValueError(f"Unknown model type encountered: {self.model_type}")
@@ -237,7 +219,7 @@ class TrainingWorker(QObject):
                  self.log_message.emit("Training stopped early by request.")
                  self.finished.emit(None) # Signal completion without results
             elif results_to_emit is None:
-                 self.log_message.emit("Training finished, but no results were generated/returned.")
+                 # Log message handled within the if/else block above
                  self.finished.emit(None)
             else:
                 self.log_message.emit("Training completed successfully.")

@@ -554,85 +554,104 @@ def load_cifar10_dataset(data_dir: str,
                            validation_split: int = 5000,
                            return_shape: str = 'flattened'
                           ) -> LoadResult:
-    """Loads the CIFAR-10 dataset from the pickled batch files.
+    """Loads the CIFAR-10 dataset from the directory containing the Python version batches.
 
     Args:
-        data_dir (str): The directory containing the 'cifar-10-batches-py' subdirectory.
-        validation_split (int): Number of samples for the validation set (taken from training).
-        return_shape (str): Desired output shape: 'flattened' or 'image'.
+        data_dir (str): The path to the 'cifar-10-batches-py' directory.
+        validation_split (int): Number of samples for the validation set.
+        return_shape (str): 'flattened' (features, samples) or 'image' (samples, H, W, C).
 
     Returns:
-        LoadResult: (X_train, Y_train, X_dev, Y_dev, num_classes, raw_X_train_flat, raw_Y_train)
+        LoadResult: Tuple containing train/dev data, num_classes, and raw data.
+                    Returns tuple of Nones and 0 if loading fails.
     """
-    print("--- Loading CIFAR-10 Dataset --- ", file=sys.stderr)
-    cifar10_subdir = os.path.join(data_dir, 'cifar-10-batches-py')
-    if not os.path.isdir(cifar10_subdir):
-        print(f"Error: CIFAR-10 directory not found: {cifar10_subdir}", file=sys.stderr)
-        return None, None, None, None, 0, None, None
-
-    num_classes = 10
-    img_dims = (32, 32, 3)
+    print(f"--- Loading CIFAR-10 Dataset (from {data_dir}) ---", file=sys.stderr)
+    X_train_flat, Y_train, X_dev_flat, Y_dev = None, None, None, None
+    raw_X_train_flattened, raw_Y_train = None, None
+    num_classes = 10 # CIFAR-10 has 10 classes
 
     try:
-        all_train_X = []
-        all_train_Y = []
+        # --- Load Class Names (batches.meta) --- #
+        meta_path = os.path.join(data_dir, 'batches.meta') # Path relative to data_dir
+        if not os.path.exists(meta_path):
+            print(f"Error: CIFAR-10 batches.meta file not found at: {meta_path}", file=sys.stderr)
+            return None, None, None, None, 0, None, None
+
+        print(f"  Loading metadata from: {meta_path}", file=sys.stderr)
+        with open(meta_path, 'rb') as fo:
+            meta = pickle.load(fo, encoding='bytes')
+        class_names = [name.decode('utf-8') for name in meta[b'label_names']]
+        print(f"  Class names: {class_names}", file=sys.stderr)
+
+        # --- Load Training Data (data_batch_1 to data_batch_5) --- #
+        all_X_train = []
+        all_Y_train = []
+        print("  Loading training batches...", file=sys.stderr)
         for i in range(1, 6):
-            batch_file = os.path.join(cifar10_subdir, f'data_batch_{i}')
-            if not os.path.exists(batch_file):
-                print(f"Error: CIFAR-10 training batch file not found: {batch_file}", file=sys.stderr)
-                return None, None, None, None, 0, None, None
-            with open(batch_file, 'rb') as fo:
-                batch_dict = pickle.load(fo, encoding='bytes')
-                all_train_X.append(batch_dict[b'data'])
-                all_train_Y.extend(batch_dict[b'labels'])
-
-        X_train_combined = np.concatenate(all_train_X)
-        Y_train_combined = np.array(all_train_Y, dtype=int)
-        print(f"Loaded {X_train_combined.shape[0]} training samples.", file=sys.stderr)
-
-        num_train_total = X_train_combined.shape[0]
-        if not (0 < validation_split < num_train_total):
-            print(f"Warning: Invalid validation_split ({validation_split}). Using default 5000.", file=sys.stderr)
-            validation_split = 5000
-
-        permutation = np.random.permutation(num_train_total)
-        X_train_shuffled = X_train_combined[permutation]
-        Y_train_shuffled = Y_train_combined[permutation]
-
-        X_dev_processed = X_train_shuffled[:validation_split]
-        Y_dev = Y_train_shuffled[:validation_split]
-        X_train_processed = X_train_shuffled[validation_split:]
-        Y_train = Y_train_shuffled[validation_split:]
-
-        raw_X_train_flat = (X_train_processed / 255.0).astype(np.float32).T
-        raw_Y_train = Y_train.copy()
-
-        X_train = X_train_processed.astype(np.float32) / 255.0
-        X_dev = X_dev_processed.astype(np.float32) / 255.0
-
-        if return_shape == 'image':
-            print("Reshaping CIFAR-10 data to 'image' format (samples, 32, 32, 3)...", file=sys.stderr)
-            try:
-                X_train = X_train.reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
-                X_dev = X_dev.reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
-            except ValueError as e:
-                 print(f"Error reshaping CIFAR-10 data to image format: {e}", file=sys.stderr)
+            batch_path = os.path.join(data_dir, f'data_batch_{i}') # Path relative to data_dir
+            if not os.path.exists(batch_path):
+                 print(f"Error: CIFAR-10 training batch file not found: {batch_path}", file=sys.stderr)
                  return None, None, None, None, 0, None, None
-        elif return_shape == 'flattened':
-            print("Reshaping CIFAR-10 data to 'flattened' format (3072, samples)...", file=sys.stderr)
-            X_train = X_train.T
-            X_dev = X_dev.T
-        else:
-             print(f"Error: Unknown return_shape '{return_shape}' for CIFAR-10. Defaulting to flattened.", file=sys.stderr)
-             X_train = X_train.T
-             X_dev = X_dev.T
+            with open(batch_path, 'rb') as fo:
+                batch = pickle.load(fo, encoding='bytes')
+                all_X_train.append(batch[b'data'])
+                all_Y_train.extend(batch[b'labels'])
+        X_train_combined = np.vstack(all_X_train)
+        Y_train_combined = np.array(all_Y_train)
+        print(f"    Training data combined shape: {X_train_combined.shape}", file=sys.stderr)
 
-        print(f"Final Shapes: X_train={X_train.shape}, Y_train={Y_train.shape}, X_dev={X_dev.shape}, Y_dev={Y_dev.shape}", file=sys.stderr)
+        # --- Load Test Data (test_batch) --- #
+        test_batch_path = os.path.join(data_dir, 'test_batch') # Path relative to data_dir
+        if not os.path.exists(test_batch_path):
+             print(f"Error: CIFAR-10 test batch file not found: {test_batch_path}", file=sys.stderr)
+             return None, None, None, None, 0, None, None
 
-        return X_train, Y_train, X_dev, Y_dev, num_classes, raw_X_train_flat, raw_Y_train
+        print("  Loading test batch...", file=sys.stderr)
+        with open(test_batch_path, 'rb') as fo:
+            batch = pickle.load(fo, encoding='bytes')
+        X_test_combined = batch[b'data']
+        Y_test_combined = np.array(batch[b'labels'])
+        print(f"    Test data loaded shape: {X_test_combined.shape}", file=sys.stderr)
 
+        # --- Combine, Normalize, and Reshape/Split --- #
+        # Combine all data before splitting
+        X_all = np.vstack((X_train_combined, X_test_combined))
+        Y_all = np.concatenate((Y_train_combined, Y_test_combined))
+
+        # Normalize pixel values to [0, 1]
+        print("  Normalizing pixel values...", file=sys.stderr)
+        X_all_normalized = X_all.astype(np.float32) / 255.0
+
+        # Store raw data BEFORE reshaping/splitting for potential inspection
+        # (Shape: samples x features)
+        raw_X_train_flattened = X_all_normalized # Storing all data as 'raw_train' for now
+        raw_Y_train = Y_all
+
+        # Reshape and Split using the helper function
+        # CIFAR image dimensions are (32, 32, 3)
+        print(f"  Splitting and reshaping to '{return_shape}'...", file=sys.stderr)
+        X_train, Y_train, X_dev, Y_dev = _reshape_and_split_data(
+            X_combined=X_all_normalized, # Pass normalized data
+            Y_labels=Y_all,
+            validation_split=validation_split,
+            return_shape=return_shape,
+            img_dims=(32, 32, 3) # Specify CIFAR dimensions
+        )
+
+        if X_train is None or Y_train is None or X_dev is None or Y_dev is None:
+            raise ValueError("Data splitting/reshaping failed.")
+
+        print("--- CIFAR-10 Loading Complete ---", file=sys.stderr)
+        return X_train, Y_train, X_dev, Y_dev, num_classes, raw_X_train_flattened, raw_Y_train
+
+    except FileNotFoundError as e:
+        print(f"Error: CIFAR-10 file not found: {e}", file=sys.stderr)
+        return None, None, None, None, 0, None, None
+    except KeyError as e:
+        print(f"Error: Missing expected key in CIFAR-10 batch file: {e}", file=sys.stderr)
+        return None, None, None, None, 0, None, None
     except Exception as e:
-        print(f"Error loading or processing CIFAR-10 dataset from {data_dir}: {e}", file=sys.stderr)
+        print(f"An unexpected error occurred during CIFAR-10 loading: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return None, None, None, None, 0, None, None
 
@@ -708,8 +727,7 @@ def load_multiple_npy_datasets(npy_file_map: Dict[str, int],
 
 # Helper to get class names if meta file exists
 def get_cifar10_class_names(data_dir: str) -> Optional[List[str]]:
-    cifar10_subdir = os.path.join(data_dir, 'cifar-10-batches-py')
-    meta_file = os.path.join(cifar10_subdir, 'batches.meta')
+    meta_file = os.path.join(data_dir, 'batches.meta') # Construct path directly from data_dir
     try:
         with open(meta_file, 'rb') as fo:
                 meta_dict = pickle.load(fo, encoding='bytes')

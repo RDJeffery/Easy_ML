@@ -42,16 +42,21 @@ def softmax(Z: np.ndarray) -> np.ndarray:
 class SimpleNeuralNetwork:
     """A simple feedforward neural network implementation."""
 
-    def __init__(self, layer_dims: List[int]):
+    def __init__(self, layer_dims: List[int], log_callback: Optional[Callable[[str], None]] = None):
         """Initializes the neural network.
 
         Args:
             layer_dims (List[int]): List containing the size of each layer,
                                      e.g., [input_size, hidden1_size, ..., output_size].
+            log_callback (Optional[Callable[[str], None]]): Function to use for logging messages.
+                                                            Defaults to print if None.
         """
         if not layer_dims or len(layer_dims) < 2:
              raise ValueError("layer_dims must contain at least input and output size.")
         self.layer_dims = layer_dims
+        # --- Store log_callback --- #
+        self.log_callback = log_callback if log_callback is not None else lambda msg: print(msg, file=sys.stderr)
+        # -------------------------- #
         self.parameters = self._init_params(layer_dims)
         self.stop_training_flag = False # Flag for stopping training externally
 
@@ -235,15 +240,36 @@ class SimpleNeuralNetwork:
 
     def _compute_loss(self, AL: np.ndarray, Y: np.ndarray, l2_lambda: float = 0.0) -> float:
         """Computes cross-entropy loss with optional L2 regularization."""
-        m = Y.shape[1] if Y.ndim > 1 else Y.shape[0]
+        # Log shapes upon entry
+        self.log_callback(f"  DEBUG [_compute_loss]: AL shape={AL.shape}, Y shape={Y.shape}")
+
+        m = Y.shape[0] # Number of examples
+        # Ensure Y has the correct shape for one-hot encoding if needed
+        if Y.ndim == 1:
+            Y = Y.reshape(1, m)
+        elif Y.shape[0] != 1 and Y.shape[1] == 1: # Handle (m, 1) column vector
+            Y = Y.T # Transpose to (1, m)
+        elif Y.shape[0] != 1: # Handle unexpected shapes
+             self.log_callback(f"  WARNING [_compute_loss]: Unexpected Y shape {Y.shape}. Attempting reshape.")
+             # This case is problematic, might indicate earlier error
+             # Try flattening and reshaping, but this is risky
+             Y = Y.flatten().reshape(1, -1)
+             m = Y.shape[1] # Recalculate m if shape changed
+
+        # One-hot encode Y
+        # Assuming AL shape is (num_classes, num_samples)
         num_classes = AL.shape[0]
-        Y = Y.reshape(1, m)
-        Y_one_hot = self._one_hot(Y.flatten(), num_classes)
+        self.log_callback(f"  DEBUG [_compute_loss]: Calling _one_hot with Y shape={Y.shape}, num_classes={num_classes}") # Log before one_hot
+        Y_one_hot = self._one_hot(Y, num_classes)
+        self.log_callback(f"  DEBUG [_compute_loss]: Y_one_hot shape={Y_one_hot.shape}") # Log after one_hot
 
-        # Cross-entropy cost
-        cross_entropy_cost = - (1./m) * np.sum(Y_one_hot * np.log(AL)) # AL clipped in softmax
+        # Compute cross-entropy cost
+        # Clip AL to prevent log(0). Softmax output should already be positive.
+        epsilon = 1e-9
+        logprobs = np.log(np.clip(AL, epsilon, 1.0))
+        cross_entropy_cost = - (1./m) * np.sum(Y_one_hot * logprobs)
 
-        # L2 regularization cost
+        # L2 Regularization Cost (if lambda > 0)
         l2_regularization_cost = 0.0
         if l2_lambda > 0:
             L = len(self.parameters) // 2

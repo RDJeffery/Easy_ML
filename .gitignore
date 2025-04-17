@@ -43,3 +43,6 @@ build/
 
 # Debugging files
 debug_processed_b64_sample_*.png
+
+# Data files - Added
+data/

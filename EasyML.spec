@@ -12,6 +12,9 @@ a = Analysis(
         ('ui', 'ui')
     ],
     hiddenimports=[
+        'numpy',
+        'numpy.core._multiarray_umath',
+        'numpy.core.multiarray',
         'drawing_canvas', 
         'plot_widget',
         'ui.training_worker',
